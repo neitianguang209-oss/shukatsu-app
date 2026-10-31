@@ -5,6 +5,8 @@
 //  - ベース情報(学年・エピソード・自己分析)は localStorage ではなく自分データベース(shukatsu_profile.builder / shukatsu_episodes)から読む
 //  - 「Claudeに書いてもらう」= 組み立てたプロンプトを shukatsu_queue に入れて claude.ai を開く。書いた本文は shukatsu_es_answers に戻る
 //  - 自動読み取りは Cowork の askClaude が無いので正規表現の簡易版だけ。貼った原文はプロンプトにも添える
+//  - 締め方は設問ごとに選ぶ(おすすめ=recommendClose)。横断ルールCと構成テンプレの締めの行はそれに合わせて書き換えた
+//  - 書き上げ済みのES(status '完成版')を手本としてプロンプトに添える
 // shukatsu-plus.js のあとに読み込む(plus / plusApi / plusEntryForCompany などを使う)。
 
 const esBuilder = (() => {
@@ -74,11 +76,35 @@ const esBuilder = (() => {
   // =====================================================
   // 設問リスト(複数設問)
   // =====================================================
+  // 締め方は設問ごとに選ぶ(2026-11-01 本人の希望で追加。既定は設問文からのおすすめ)
+  const CLOSES = {
+    "学び":   { label: "事実・学びで締める", rule: "事実・学びで締める(例「〜した経験です」「〜を学びました」)。強みの言い切りにしない" },
+    "身につき": { label: "「〜する力が身につきました」", rule: "「〜する力が身につきました」の形で、学びを力の言葉にして締める" },
+    "強み":   { label: "「〜が私の強みです」", rule: "「〜が私の強みです」で締める(入社後の活かし方を添えてよい)" },
+    "志望":   { label: "入社後/参加中にしたいこと", rule: "入社後(インターンなら参加中)に挑戦したいこと・持ち帰りたいもので締める" },
+  };
+  function recommendClose(q){
+    if(/強み|自己\s*PR|自己ピーアール|長所|アピール/i.test(q)) return "強み";
+    if(/志望|なぜ当社|なぜ弊社|参加したい|応募した理由|期待すること|入社後|当社で|弊社で/.test(q)) return "志望";
+    if(/困難|挫折|失敗|乗り越え|苦労|壁|逆境/.test(q)) return "学び";
+    if(/学んだ|得た|身につけ|身に付け|成長/.test(q)) return "身につき";
+    if(/力を入れ|打ち込|注力|ガクチカ|学生時代|頑張った/.test(q)) return "身につき";
+    return "学び";
+  }
+  function closeOf(q){ return q.close && CLOSES[q.close] ? q.close : recommendClose(q.text); }
+  function buildCloseSelect(sel, text, selected){
+    const cur = selected !== undefined ? selected : sel.value;
+    const rec = recommendClose(text);
+    sel.innerHTML = `<option value="auto">おすすめ:${CLOSES[rec].label}</option>` +
+      Object.entries(CLOSES).map(([k, c]) => `<option value="${k}">${c.label}</option>`).join("");
+    sel.value = cur && (cur === "auto" || CLOSES[cur]) ? cur : "auto";
+  }
+
   function isExperienceQ(q){
     if(!q) return false;
     return /ガクチカ|学生時代|力を入れ|注力した|打ち込ん|自己\s*PR|自己ピーアール|あなたの強み|強みを|長所|困難|挑戦したこと|成し遂げ|成果|経験を教え|頑張ったこと|苦労した/i.test(q);
   }
-  function addQuestion(text="", chars="400", ep="auto", esId=""){
+  function addQuestion(text="", chars="400", ep="auto", esId="", close="auto"){
     const div = document.createElement("div");
     div.className = "eb-qrow";
     div.dataset.esId = esId;
@@ -96,13 +122,16 @@ const esBuilder = (() => {
           <label>主役にするエピソード <span class="eb-hint">(基本は自動でOK)</span></label>
           <select class="q-ep"></select>
         </div>
-      </div>`;
+      </div>
+      <label style="margin-top:6px">締め方 <span class="eb-hint">(設問に合わせたおすすめ。変えてもOK)</span></label>
+      <select class="q-close"></select>`;
     div.querySelector(".q-text").value = text;
     div.querySelector(".q-chars").value = chars || "400";
     div.querySelector(".eb-qdel").onclick = ()=>{ div.remove(); renumberQuestions(); saveDraft(); };
     div.querySelector(".q-text").addEventListener("input", ()=>updateQType(div));
     $("qList").appendChild(div);
     buildEpSelect(div.querySelector(".q-ep"), ep);
+    buildCloseSelect(div.querySelector(".q-close"), text, close);
     renumberQuestions(); updateQType(div);
     return div;
   }
@@ -114,6 +143,8 @@ const esBuilder = (() => {
     const tag = row.querySelector(".eb-qtype");
     if(isExperienceQ(t)){ tag.textContent = "経験・強み系 → PREP型"; tag.classList.add("exp"); }
     else { tag.textContent = "志望動機・その他"; tag.classList.remove("exp"); }
+    const cs = row.querySelector(".q-close");
+    if (cs) buildCloseSelect(cs, t);
   }
   function buildEpSelect(sel, selected){
     const eps = getEpisodes();
@@ -133,6 +164,7 @@ const esBuilder = (() => {
       text: r.querySelector(".q-text").value.trim(),
       chars: parseInt(r.querySelector(".q-chars").value||"400",10),
       ep: r.querySelector(".q-ep").value,
+      close: r.querySelector(".q-close").value,
       esId: r.dataset.esId || ""
     })).filter(q=>q.text);
   }
@@ -169,7 +201,8 @@ const esBuilder = (() => {
         noneNote = "\n・この設問は具体エピソードを主役にせず、設問そのものに端的に答える。考え方・想い・価値観は自分史に沿って自然な自分の言葉で書く。ただし「無印では」「長期インターンでは」のような所属・種別の枕詞や定型の前置きは入れない。";
       }
       else if(q.ep!=="auto"){ const n = eps.findIndex(e=>e.id===q.ep); const e = eps[n]; if(e) epStr = `エピソード${n+1}${e.label?"("+e.label+")":""}を必ず主役に使う`; }
-      return `【設問${i+1}】${q.text}\n・字数: ${q.chars}字の95〜100%(末尾に実字数を明記)\n・構成タイプ: ${type}\n・使用エピソード: ${epStr}${noneNote}`;
+      const closeStr = `${CLOSES[closeOf(q)].rule}${q.close==="auto" ? "(設問の内容からのおすすめ)" : "(本人の指定)"}`;
+      return `【設問${i+1}】${q.text}\n・字数: ${q.chars}字の95〜100%(末尾に実字数を明記)\n・構成タイプ: ${type}\n・使用エピソード: ${epStr}\n・締め方: ${closeStr}${noneNote}`;
     }).join("\n\n");
   }
   function structureTemplates(){
@@ -181,7 +214,7 @@ const esBuilder = (() => {
 ・設問「困難を乗り越えた経験」→「私が乗り越えた困難は〜です」
 1 結論:上記ルールに従い、設問へのオウム返しで一文回答する
 2 エピソード:課題 → 転機 → 行動 → 結果 の順で具体的に展開する
-3 締め:強みの言い切りは冒頭ではなく締めの一文に置き、「〜する力が身につきました」の形で終える
+3 締め:強みの言い切りは冒頭ではなく締めの一文に置く。締めの形は設問一覧の「締め方」に従う
 ※短い字数のときは「1感情の機微 → 2具体策の細部」の順に削り、結論・転機・結果は必ず残す`;
     const motive = isIntern() ?
 `■ 志望動機系の設問 → インターン構成
@@ -206,7 +239,7 @@ A. エピソード設計(手戻り防止の最重要):
   - 着手前に「使用可エピソード数 ≧ 経験エピソード設問数」を確認する。足りなければ、どのネタを切り口を変えて再利用するか明示し、再利用時は課題・行動・学びの角度を必ず変える。
   - 各エピソードは〈つまずき/転機 → 具体的工夫 → 結果〉の3点で書く。欠けている要素は創作せず、不足として質問する。
 B. 設問タイプは設問文から自分で判定する。「なぜ参加/志望するか」=志望動機型、「〜した経験を教えて」=経験エピソード型。与えた構成タイプのラベルが設問文と矛盾する場合は設問文を優先する。
-C. 締め方:経験エピソード設問は「〜した経験です」など事実・学びで締める。「強み」「自己PR」を明示的に問う設問のときだけ「〜が私の強みです」で締める。締めの型を全設問に一律強制しない。
+C. 締め方:設問一覧の各設問にある「締め方」に従う(設問の内容に合わせたおすすめ、または本人の指定)。締めの型を全設問に一律強制しない。締めの一文は前段から自然に導けるものにする。
 D. 字数と削り方:優先は「分かりやすさ ＞ 網羅」。1設問=1メッセージに絞る。字数に収まらないときは表現を圧縮せず、要素そのものを削り、最低限「結論」と「結果」を残す。95〜100%は維持するが、空き字数は新情報の追加でなく、一番伝えたいことを丁寧に書くために使う。
 E. 変数(ぶれやすい項目=応募コース/テーマ、伸ばしたい力・なりたい状態の軸、締めで寄せたい強み)は、入力があれば最優先で従う。空欄のものがあれば、本文を書く前にまとめて1回だけ質問する。
 F. 接続詞バンク・一文一義などの表現細則は「補助ルール」。A〜Eを満たした上で適用し、細則のために自然さ・分かりやすさを犠牲にしない。`;
@@ -323,6 +356,7 @@ ${questionListBlock()||"【設問1】当社を志望する理由を教えてく�
 - 活かせる経験・スキル: ${val("skills")||"なし"}
 ■ エピソード集(設問ごとに最適なものを割り当てて使う):
 ${episodesBlock()}
+${finishedBlock()}
 ${val("selfHistory")? "\n■ 自己分析・自分史(背景資料):\nエピソード選定・自分軸の言語化・設問間の一貫性の土台として参照する。本文に丸写しせず、ここから一貫した人物像と価値観を読み取って各回答に反映する。\n"+val("selfHistory") : ""}
 ${(val("axisState")||val("axisStrength"))? "\n■ 固定した軸(最優先で従う):\n"+[val("axisState")?"・伸ばしたい力/なりたい状態: "+val("axisState"):"", val("axisStrength")?"・締めで寄せたい強み(全設問の締めの方向): "+val("axisStrength"):""].filter(Boolean).join("\n") : ""}
 ${r? "\n■ 私が把握している会社情報(参考・要ファクトチェック):\n"+r : ""}
@@ -347,6 +381,13 @@ ${outputFormatText()}
  ・3問を一度にまとめて提示してください(Q1・Q2・Q3)。1問ずつ私の回答を待たず、私が「1つ目→2つ目→3つ目」と続けて答えられる流れにすること。
  ・各質問には選択肢を付けてください(例:A/B/C+「その他(自由記述)」)。
  ・私が3問すべてに答えてから、本文を出力してください。${multi? "\n※複数設問なので、質問のうち1つは「エピソードの割り当て案はこれで良いか」の確認にすること(割り当て案を提示して選ばせる)。" : ""}${hasProgram()? "\n※「応募先プログラムの内容」があるので、質問のうち1つは『どのトラック/テーマに応募するか(=志望動機をどのプログラムに寄せるか)』の確認にすること。" : ""}${isIntern()? "\n※インターンなので質問に必ず次のどれかを含める:『どんな状態になりたい?』『今足りない力は?』『なぜ他社でなくここ?』" : ""}${pastedBlock()}`;
+  }
+  // 移植で足したもの: Coworkのエピソード集に入っていた書き上げ済みES(ESタブの「共通(完成版)」)
+  function finishedBlock(){
+    const xs = (plus.es || []).filter(a => a.status === "完成版" && a.answer);
+    if(!xs.length) return "";
+    return "\n■ 書き上げ済みのES(手本。事実・用語統一・言い回しをそろえるために参照する。そのまま流用せず、各設問と字数に合わせて書き直す):\n" +
+      xs.map(a => `・${a.question}(${plusCount(a.answer)}字): ${a.answer}`).join("\n");
   }
   // 移植で足したもの: 簡易読み取りの取りこぼし対策に、貼った原文をそのまま添える
   function pastedBlock(){
@@ -478,7 +519,8 @@ ${outputFormatText()}
   function saveDraft(){
     if (!$("company")) return;
     const d = { kind: getKind(), ctx, questions: [...document.querySelectorAll("#eb_qList .eb-qrow")].map(r => ({
-      text: r.querySelector(".q-text").value, chars: r.querySelector(".q-chars").value, ep: r.querySelector(".q-ep").value, esId: r.dataset.esId || "" })) };
+      text: r.querySelector(".q-text").value, chars: r.querySelector(".q-chars").value, ep: r.querySelector(".q-ep").value,
+      close: r.querySelector(".q-close").value, esId: r.dataset.esId || "" })) };
     DRAFT_FIELDS.forEach(f => d[f] = $(f).value);
     plusStore.set(DRAFT_KEY, JSON.stringify(d));
   }
@@ -489,7 +531,7 @@ ${outputFormatText()}
     DRAFT_FIELDS.forEach(f => { if (d[f] != null) $(f).value = d[f]; });
     const r = document.querySelector(`input[name=eb_kind][value="${d.kind}"]`); if (r) r.checked = true;
     ctx = d.ctx || ctx;
-    (d.questions || []).forEach(q => addQuestion(q.text, q.chars, q.ep, q.esId));
+    (d.questions || []).forEach(q => addQuestion(q.text, q.chars, q.ep, q.esId, q.close || "auto"));
     if (!(d.questions || []).length) addQuestion();
   }
   function resetForm(){

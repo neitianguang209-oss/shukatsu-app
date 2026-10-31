@@ -5,7 +5,7 @@
 
 const PLUS_KEY_STORE = "shukatsu:key";
 const PLUS_CACHE = "shukatsu:plusCache";
-const PLUS_ES_STATUSES = ["下書き", "書いてもらい中", "入力済み(未提出)", "提出済", "素材(設問ごと未分割)"];
+const PLUS_ES_STATUSES = ["下書き", "書いてもらい中", "入力済み(未提出)", "提出済", "完成版", "素材(設問ごと未分割)"];
 const PLUS_LOG_KINDS = ["締切", "予定", "連絡", "提出控え", "メモ"];
 const PLUS_LOG_ICON = { "締切": "⏰", "予定": "📅", "連絡": "✉️", "提出控え": "📨", "メモ": "🗒" };
 
