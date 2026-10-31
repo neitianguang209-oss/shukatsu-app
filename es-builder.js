@@ -16,7 +16,14 @@ const esBuilder = (() => {
   const DRAFT_KEY = "shukatsu:builderDraft";
   const INDUSTRIES = ["コンサル","金融","商社","メーカー","インフラ","IT・SaaS","その他"];
   const KINDS = ["本選考","インターン","1day仕事体験"];
-  let ctx = { entry_id: "", program: "" };   // 会社画面から開いたときの紐づけ
+  let ctx = { entry_id: "", program: "", url: "" };   // 会社画面・ブックマークから開いたときの紐づけ(url はES画面)
+  const APP_URL = "https://neitianguang209-oss.github.io/shukatsu-app/";
+  // ESページで押すと、そのページの文字とURLをビルダーに送るブックマーク
+  const BOOKMARKLET = "javascript:(()=>{try{var t=(document.body.innerText||'').slice(0,12000);" +
+    "var a=[].slice.call(document.querySelectorAll('textarea,input[type=text]')).map(function(x){var l=x.maxLength;return l>0?l:null}).filter(Boolean);" +
+    "if(a.length)t+='\\n【入力欄の文字数の上限】'+a.join(',');" +
+    "var s=btoa(unescape(encodeURIComponent(JSON.stringify({u:location.href,ti:document.title,t:t}))));" +
+    "window.open('" + APP_URL + "#import='+encodeURIComponent(s),'_blank')}catch(e){alert('送れませんでした: '+e)}})()";
   let baseFilled = false, lastOutput = "";
 
   function getKind(){ const r = document.querySelector('input[name=eb_kind]:checked'); return r ? r.value : "本選考"; }
@@ -538,17 +545,56 @@ ${outputFormatText()}
     if (!confirm("この応募の入力(会社・設問・プログラム・軸)を空にしますか?ベース情報は残ります。")) return;
     DRAFT_FIELDS.forEach(f => { $(f).value = f === "industry" ? "その他" : f === "tone" ? "誠実・丁寧" : ""; });
     document.querySelector('input[name=eb_kind][value="本選考"]').checked = true;
-    ctx = { entry_id: "", program: "" };
-    clearQuestions(); addQuestion(); refreshKind();
+    ctx = { entry_id: "", program: "", url: "" };
+    clearQuestions(); addQuestion(); refreshKind(); showUrl();
     $("parseResult").textContent = ""; $("outCard").style.display = "none";
     plusStore.set(DRAFT_KEY, "");
   }
   function onCompany(){
     const e = plusEntryForCompany(val("company"));
     $("companyHint").textContent = e ? `✓ 選考管理の「${e.company}${e.program ? "(" + e.program + ")" : ""}」に紐づけます` : (val("company") ? "選考管理に無い会社です(保存すると社名で紐づけます)" : "");
-    if (e && ctx.entry_id !== e.id) ctx = { entry_id: e.id, program: e.program || "" };
-    if (!e) ctx = { entry_id: "", program: "" };
+    if (e && ctx.entry_id !== e.id) ctx = { ...ctx, entry_id: e.id, program: e.program || "" };
+    if (!e) ctx = { ...ctx, entry_id: "", program: "" };
+    showUrl();
   }
+  function showUrl(){
+    const el = $("urlHint");
+    if (el) el.textContent = ctx.url ? `ESのページ:${ctx.url}(パソコンのClaudeがここに入力します)` : "";
+  }
+
+  // ブックマーク「就活アプリへ送る」から来たとき(#import=...)
+  function companyFromPage(title, text){
+    const hay = plusNorm((title || "") + " " + (text || "").slice(0, 3000));
+    let best = null;
+    entries.forEach(e => {
+      const n = plusNorm(e.company);
+      if (n.length >= 2 && hay.includes(n) && (!best || n.length > plusNorm(best.company).length)) best = e;
+    });
+    return best;
+  }
+  function importFromHash(){
+    const m = location.hash.match(/import=([^&]+)/);
+    if (!m) return;
+    history.replaceState(null, "", location.pathname + location.search);
+    let d;
+    try { d = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))); }
+    catch (e) { showToast("ページを読み込めませんでした"); return; }
+    install();
+    DRAFT_FIELDS.forEach(f => { $(f).value = f === "industry" ? "その他" : f === "tone" ? "誠実・丁寧" : ""; });
+    document.querySelector('input[name=eb_kind][value="本選考"]').checked = true;
+    clearQuestions();
+    ctx = { entry_id: "", program: "", url: d.u || "" };
+    $("pasteSrc").value = d.t || "";
+    parsePage();
+    const e = companyFromPage(d.ti, d.t);
+    if (e) { $("company").value = e.company; ctx.entry_id = e.id; ctx.program = e.program || ""; if (e.program && !val("internType")) $("internType").value = e.program; }
+    if (!getQuestions().length) addQuestion();
+    refreshKind(); onCompany(); saveDraft();
+    showBuilder();
+    showToast(`ページを読み込みました(設問${getQuestions().length}問)。確かめて「Claudeに書いてもらう」`);
+  }
+  window.addEventListener("hashchange", importFromHash);
+  setTimeout(importFromHash, 0);
 
   // =====================================================
   // Claudeへ
@@ -579,7 +625,7 @@ ${outputFormatText()}
       }
       const prompt = buildFullPrompt();
       const builder = JSON.parse(plusStore.get(DRAFT_KEY) || "{}");
-      const r = await plusApi("request_es", { company, entry_id: entryId, program, es_ids: ids,
+      const r = await plusApi("request_es", { company, entry_id: entryId, program, es_ids: ids, url: ctx.url || "",
         questions: qs.map(q => ({ q: q.text, limit: q.chars })), prompt, builder });
       saveDraft();
       const msg = `就活アプリのES書いて(待ち#${r.queue_id} ${company} ${ids.length}問)`;
@@ -625,6 +671,14 @@ ${outputFormatText()}
     <button type="button" class="secondary" id="eb_pasteClear">クリア</button>
   </div>
   <p class="eb-hint" id="eb_parseResult"></p>
+  <details class="eb-bm">
+    <summary>📌 貼り付けなしで送る:ESのページで押すだけのボタン</summary>
+    <div class="eb-hint">ESの設問ページ(マイページの中でもOK)でこのボタンを押すと、ページの文字とURLがこのビルダーに入ります。</div>
+    <div class="eb-hint" style="margin-top:6px"><b>パソコン:</b>下のボタンをブックマークバーへドラッグ。</div>
+    <a class="eb-bm-link" id="eb_bmLink" href="#">✍️ 就活アプリへ送る</a>
+    <div class="eb-hint" style="margin-top:6px"><b>iPhone:</b>①どこかのページで共有→「ブックマークを追加」(名前を「就活アプリへ送る」)②「コードをコピー」を押す ③ブックマークを編集してアドレス欄をコピーしたものに置き換える。使うときはESのページでアドレス欄をタップ→このブックマーク。</div>
+    <button type="button" class="secondary" id="eb_bmCopy" style="margin-top:6px">コードをコピー</button>
+  </details>
 </div>
 <div class="eb-card">
   <h3><span class="eb-badge">STEP 1</span> 応募種別</h3>
@@ -647,6 +701,7 @@ ${outputFormatText()}
       <input type="text" id="eb_company" list="eb_companyList" placeholder="例:三菱商事">
       <datalist id="eb_companyList"></datalist>
       <div class="eb-hint" id="eb_companyHint"></div>
+      <div class="eb-url" id="eb_urlHint"></div>
     </div>
     <div>
       <label>業界</label>
@@ -749,6 +804,10 @@ ${outputFormatText()}
     .eb-ep summary { cursor: pointer; }
     .eb-ep-body { font-size: 12px; color: #374151; line-height: 1.7; margin-top: 6px; white-space: pre-wrap; }
     .eb-tag { font-size: 11px; background: #f3f4f6; border-radius: 6px; padding: 1px 6px; color: var(--muted); }
+    .eb-bm { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+    .eb-bm summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--primary); }
+    .eb-bm-link { display: inline-block; margin-top: 6px; padding: 8px 14px; border-radius: 999px; background: var(--primary); color: #fff; font-weight: 700; font-size: 13px; text-decoration: none; cursor: grab; }
+    .eb-url { font-size: 11.5px; color: var(--muted); word-break: break-all; margin-top: 4px; }
     `;
   }
 
@@ -779,6 +838,9 @@ ${outputFormatText()}
     $("copyOut").onclick = () => { copyToClipboard($("output").value); showToast("編集後の内容をコピーしました"); };
     $("revert").onclick = () => { $("output").value = lastOutput; recount(); showToast("生成直後の内容に戻しました"); };
     $("company").addEventListener("change", onCompany);
+    $("bmLink").setAttribute("href", BOOKMARKLET);
+    $("bmLink").addEventListener("click", ev => { ev.preventDefault(); showToast("ブックマークバーへドラッグしてください"); });
+    $("bmCopy").onclick = async () => { if (await copyToClipboard(BOOKMARKLET)) showToast("コピーしました。ブックマークのアドレスに貼ってください"); };
     host.addEventListener("input", ev => { if (!ev.target.closest("#eb_grade,#eb_selfHistory,#eb_skills,#eb_output")) saveDraft(); });
     host.addEventListener("change", ev => { if (ev.target.matches(".q-ep,select")) saveDraft(); });
     ["grade", "selfHistory", "skills"].forEach(f => $(f).addEventListener("input", () => { $("savedMark").textContent = "(未保存)"; baseFilled = true; }));
@@ -801,7 +863,7 @@ ${outputFormatText()}
       if (!confirm(`ビルダーには「${val("company")}」の入力が残っています。${o.company}の内容に入れ替えますか?`)) { showBuilder(); return; }
     }
     $("company").value = o.company || "";
-    ctx = { entry_id: o.entry_id || "", program: o.program || "" };
+    ctx = { entry_id: o.entry_id || "", program: o.program || "", url: o.url || "" };
     if (o.program && !val("internType")) $("internType").value = o.program;
     if (/インターン|days|day/i.test(o.program || "")) {
       const r = document.querySelector('input[name=eb_kind][value="インターン"]'); if (r) { r.checked = true; refreshKind(); }
