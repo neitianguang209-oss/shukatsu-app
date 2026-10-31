@@ -11,7 +11,7 @@ const PLUS_LOG_ICON = { "締切": "⏰", "予定": "📅", "連絡": "✉️", "
 
 let plus = { es: [], log: [], queue: [], episodes: [], notes: [] };
 let plusReady = false, plusLoading = false, plusError = "";
-let plusEsFilter = "", plusEsSearch = "", plusEsView = "es";   // es | material
+let plusEsFilter = "", plusEsSearch = "", plusEsView = "es";   // builder | es | material
 let plusEditingEs = null;
 
 const plusStore = {
@@ -49,7 +49,8 @@ async function plusLoad(quiet) {
   plusLoading = true;
   try {
     const d = await plusApi("load");
-    plus = { es: d.es || [], log: d.log || [], queue: d.queue || [], episodes: d.episodes || [], notes: d.notes || [] };
+    plus = { es: d.es || [], log: d.log || [], queue: d.queue || [], episodes: d.episodes || [], notes: d.notes || [],
+             profile: d.profile || null, insights: d.insights || [] };
     plusReady = true; plusError = "";
     // 0件のときは控えを上書きしない
     if (plus.es.length || plus.log.length) plusStore.set(PLUS_CACHE, JSON.stringify(plus));
@@ -152,7 +153,13 @@ function plusCardHtml(e) {
 }
 
 // ---------- これから(選考管理タブの上) ----------
+function plusShowBuilderView() {
+  const b = document.getElementById("ebView");
+  if (b) b.style.display = currentTab === "es" && plusEsView === "builder" && plusReady ? "" : "none";
+}
+
 function plusRenderUpcoming() {
+  plusShowBuilderView();
   const el = document.getElementById("plusUpcoming");
   if (!el) return;
   if (currentTab !== "main") { el.innerHTML = ""; return; }
@@ -228,7 +235,7 @@ function plusRenderModalSection(entryId) {
     ${f.es.map(plusEsMiniHtml).join("") || `<div class="plus-muted">まだありません。</div>`}
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">
       <button type="button" class="secondary icon" data-plus-es-new="${e.id}">＋ ESの設問を追加</button>
-      ${f.es.some(x => !x.answer) ? `<button type="button" class="secondary icon" data-plus-ask="${e.id}">🤖 空の設問をClaudeに書いてもらう</button>` : ""}
+      <button type="button" class="secondary icon" data-plus-ask="${e.id}">🤖 ESビルダーで書く${f.es.some(x => !x.answer) ? "(空の設問を入れて開く)" : ""}</button>
     </div>
     ${f.queue.length ? `<div class="plus-wait-line">⏳ ${f.queue.map(q => `${escapeHtml(q.kind)}:${escapeHtml(q.status)}${q.note ? `(${escapeHtml(q.note)})` : ""}`).join(" / ")}</div>` : ""}
   `;
@@ -269,9 +276,12 @@ function plusRenderEsTab() {
   }
   const head = `
     <div class="plus-seg">
+      <button class="${plusEsView === "builder" ? "on" : ""}" data-plus-view="builder">🪄 ビルダー</button>
       <button class="${plusEsView === "es" ? "on" : ""}" data-plus-view="es">ES ${plus.es.length}</button>
-      <button class="${plusEsView === "material" ? "on" : ""}" data-plus-view="material">材料(エピソード) ${plus.episodes.length}</button>
+      <button class="${plusEsView === "material" ? "on" : ""}" data-plus-view="material">材料 ${plus.episodes.length}</button>
     </div>`;
+  plusShowBuilderView();
+  if (plusEsView === "builder") { v.innerHTML = head; if (typeof esBuilder !== "undefined") esBuilder.sync(); return; }
   if (plusEsView === "material") { v.innerHTML = head + plusMaterialHtml(); return; }
   const q = plusEsSearch.trim();
   let items = plus.es.slice();
@@ -432,7 +442,7 @@ async function plusSaveEs(ask) {
   try {
     const saved = await plusApi("save_es", args);
     plusCloseEsModal();
-    if (ask) await plusAskClaude(company, args.entry_id, args.program, [saved.id]);
+    if (ask) plusOpenBuilder(company, args.entry_id, args.program, [saved]);
     else showToast("保存しました");
     plusLoad(true);
   } catch (e) { showToast("保存できませんでした: " + e.message); }
@@ -443,13 +453,10 @@ async function plusDeleteEs() {
   catch (e) { showToast("削除できませんでした: " + e.message); }
 }
 
-// Claudeに書いてもらう: 待ち行列に入れて、claude.ai を開く(文はコピーもしておく)
-async function plusAskClaude(company, entryId, program, esIds) {
-  const r = await plusApi("request_es", { company, entry_id: entryId || "", program: program || "", es_ids: esIds });
-  const msg = `就活アプリのES書いて(待ち#${r.queue_id} ${company} ${esIds.length}問)`;
-  await copyToClipboard(msg);
-  showToast("Claudeの待ちに入れました。開いたClaudeでそのまま送信してください");
-  window.open("https://claude.ai/new?q=" + encodeURIComponent(msg), "_blank");
+// Claudeに書いてもらうときは、いつもESビルダー(es-builder.js)を通す。設問をビルダーに入れて開く
+function plusOpenBuilder(company, entryId, program, esRows) {
+  esBuilder.openWith({ company, entry_id: entryId || "", program: program || "",
+    questions: esRows.map(a => ({ text: a.question || "", chars: a.char_limit || 400, esId: a.id })) });
 }
 
 // ---------- 画面への組み込み ----------
@@ -538,8 +545,7 @@ async function plusAskClaude(company, entryId, program, esIds) {
     }
     if (ds.plusAsk) {
       const e = entries.find(x => x.id === ds.plusAsk);
-      const ids = plusFor(e).es.filter(x => !x.answer).map(x => x.id);
-      try { await plusAskClaude(e.company, e.id, e.program, ids); plusLoad(true); } catch (err) { showToast("できませんでした: " + err.message); }
+      plusOpenBuilder(e.company, e.id, e.program, plusFor(e).es.filter(x => !x.answer));
       return;
     }
     if (ds.plusCopy) {
