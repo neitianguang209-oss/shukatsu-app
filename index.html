@@ -757,9 +757,11 @@
   <div class="tab-bar">
     <button class="tab-btn active" data-tab="main">📋 選考管理</button>
     <button class="tab-btn" data-tab="favored">★ 優遇IS</button>
+    <button class="tab-btn" data-tab="es">✍️ ES</button>
   </div>
+  <div id="plusUpcoming"></div>
   <div class="stats" id="stats"></div>
-  <div class="filters">
+  <div class="filters" id="mainFilters">
     <input type="text" id="searchInput" class="search" placeholder="企業名で検索" />
     <select id="industryFilter"><option value="">すべての業界</option></select>
     <select id="phaseFilter"><option value="">すべてのフェーズ</option></select>
@@ -771,6 +773,7 @@
     </select>
   </div>
   <div id="list" class="card-list"></div>
+  <div id="esView" style="display:none"></div>
 </div>
 <div class="modal-backdrop" id="modal">
   <div class="modal">
@@ -872,6 +875,7 @@
       <div id="reviewEditor"></div>
       <button type="button" class="secondary icon" id="reviewAddBtn" style="margin-top:6px;">＋ 振り返りを追加</button>
     </div>
+    <div id="plusSection" style="display:none"></div>
     <div class="modal-actions">
       <button class="secondary danger" id="deleteBtn" style="display:none">削除</button>
       <div class="right">
@@ -1826,7 +1830,8 @@
     const a = e.deadline ? new Date(e.deadline).getTime() : null;
     const b = e.webDeadline ? new Date(e.webDeadline).getTime() : null;
     const c = e.otherDeadline ? new Date(e.otherDeadline).getTime() : null;
-    const arr = [a, b, c].filter(x => x !== null);
+    const d = typeof plusNextDueMs === "function" ? plusNextDueMs(e) : null;   // Claudeが記録した締切・予定
+    const arr = [a, b, c, d].filter(x => x !== null);
     return arr.length ? Math.min(...arr) : null;
   }
   function dayChipClass(d) {
@@ -2130,6 +2135,7 @@
           </div>
           ${planHtml}
           ${deadlineRow}
+          ${typeof plusCardHtml === "function" ? plusCardHtml(e) : ""}
           ${memoHtml}
           ${linksHtml}
           ${imagesHtml}
@@ -2142,7 +2148,13 @@
     document.getElementById("emailBtn").style.display = currentTab === "main" ? "" : "none";
     document.getElementById("bulkPerkBtn").style.display = currentTab === "favored" ? "" : "none";
     document.getElementById("scrshotBtn").style.display = currentTab === "favored" ? "" : "none";
-    if (currentTab === "main") {
+    const isEs = currentTab === "es";
+    ["stats", "mainFilters", "list"].forEach(id => { document.getElementById(id).style.display = isEs ? "none" : ""; });
+    document.getElementById("esView").style.display = isEs ? "" : "none";
+    if (typeof plusRenderUpcoming === "function") plusRenderUpcoming();
+    if (isEs) {
+      if (typeof plusRenderEsTab === "function") plusRenderEsTab();
+    } else if (currentTab === "main") {
       renderStats();
       renderFilterOptions();
       renderList();
@@ -2386,6 +2398,7 @@
     currentReviews = Array.isArray(data.reviews) ? data.reviews.map(r => ({ ...r })) : [];
     renderReviewEditor();
     document.getElementById("deleteBtn").style.display = e ? "" : "none";
+    if (typeof plusRenderModalSection === "function") plusRenderModalSection(e ? e.id : null);
     const det = document.querySelector(".form-section");
     det.open = !!(data.mypageUrl || data.mypageId || data.mypagePassword);
     document.getElementById("modal").classList.add("open");
@@ -3413,6 +3426,7 @@
   });
   document.getElementById("addBtn").addEventListener("click", () => {
     if (currentTab === "main") openModal(null);
+    else if (currentTab === "es") plusOpenEsModal(null);
     else openFavoredModal(null);
   });
   document.getElementById("bulkPerkBtn").addEventListener("click", () => openBatchModal(""));
@@ -3781,5 +3795,6 @@
     }
   })();
 </script>
+<script src="shukatsu-plus.js?v=1"></script>
 </body>
 </html>
