@@ -9,7 +9,7 @@ const PLUS_ES_STATUSES = ["下書き", "書いてもらい中", "入力済み(�
 const PLUS_LOG_KINDS = ["締切", "予定", "連絡", "提出控え", "メモ"];
 const PLUS_LOG_ICON = { "締切": "⏰", "予定": "📅", "連絡": "✉️", "提出控え": "📨", "メモ": "🗒" };
 
-let plus = { es: [], log: [], queue: [], episodes: [], notes: [] };
+let plus = { es: [], log: [], queue: [], episodes: [], notes: [], block: [] };
 let plusReady = false, plusLoading = false, plusError = "";
 let plusEsFilter = "", plusEsSearch = "", plusEsView = "es";   // builder | es | material
 let plusEditingEs = null;
@@ -50,7 +50,7 @@ async function plusLoad(quiet) {
   try {
     const d = await plusApi("load");
     plus = { es: d.es || [], log: d.log || [], queue: d.queue || [], episodes: d.episodes || [], notes: d.notes || [],
-             profile: d.profile || null, insights: d.insights || [] };
+             profile: d.profile || null, insights: d.insights || [], block: d.block || [] };
     plusReady = true; plusError = "";
     // 0件のときは控えを上書きしない
     if (plus.es.length || plus.log.length) plusStore.set(PLUS_CACHE, JSON.stringify(plus));
@@ -167,7 +167,8 @@ function plusRenderUpcoming() {
   const limit = Date.now() + 14 * 86400000;
   const items = plusOpenLogs(plus.log).filter(l => new Date(l.due_at).getTime() <= limit);
   const waiting = plus.queue.filter(q => q.status === "待ち").length;
-  if (!items.length && !waiting) { el.innerHTML = ""; return; }
+  const blockHtml = plusBlockPanelHtml();
+  if (!items.length && !waiting) { el.innerHTML = blockHtml; return; }
   const expanded = el.dataset.expanded === "1";
   const shown = expanded ? items : items.slice(0, 5);
   el.innerHTML = `
@@ -186,7 +187,62 @@ function plusRenderUpcoming() {
       }).join("")}
       ${items.length > 5 ? `<button class="plus-more" data-plus-more>${expanded ? "たたむ" : `ほか${items.length - 5}件を見る`}</button>` : ""}
       ${waiting ? `<div class="plus-wait-line">⏳ Claudeの待ち ${waiting}件(ESの下書き・登録)</div>` : ""}
-    </div>`;
+    </div>${blockHtml}`;
+}
+
+// ---------- もういらない会社(メール係が無視/迷惑メールにする) ----------
+function plusBlocked() { return (plus.block || []).filter(b => b.status === "ブロック"); }
+function plusBlockFor(company) {
+  const n = plusNorm(company);
+  return (plus.block || []).find(b => plusNorm(b.company) === n) || null;
+}
+// 週1でメール係が出す「整理の候補」と、ブロック中の一覧
+function plusBlockPanelHtml() {
+  const cands = (plus.block || []).filter(b => b.status === "候補");
+  const blocked = plusBlocked();
+  if (!cands.length && !blocked.length) return "";
+  return `<div class="plus-panel">
+    ${cands.length ? `<div class="plus-panel-head">整理の候補<span>${cands.length}社</span></div>
+      <div class="plus-muted">宣伝ばかり届く・しばらく動きのない会社です。「いらない」にすると、次からメール係が無視します。</div>
+      ${cands.map(b => `<div class="plus-up-row">
+        <div class="plus-up-main"><div class="plus-up-title"><b>${escapeHtml(b.company)}</b></div><div class="plus-muted">${escapeHtml(b.reason || "")}</div></div>
+        <button class="secondary icon" data-plus-keep="${b.id}">残す</button>
+        <button class="secondary icon danger" data-plus-block-cand="${b.id}">いらない</button>
+      </div>`).join("")}` : ""}
+    ${blocked.length ? `<details class="plus-block-list" ${cands.length ? "" : "open"}>
+      <summary>🚫 もういらない会社 ${blocked.length}社</summary>
+      ${blocked.map(b => `<div class="plus-up-row">
+        <div class="plus-up-main"><div class="plus-up-title">${escapeHtml(b.company)}</div><div class="plus-muted">${b.mode === "迷惑メール" ? "迷惑メールにする" : "無視する"}${b.reason ? "・" + escapeHtml(b.reason) : ""}</div></div>
+        <button class="secondary icon" data-plus-unblock="${b.id}">戻す</button>
+      </div>`).join("")}
+    </details>` : ""}
+  </div>`;
+}
+function plusBlockFormHtml(e) {
+  const b = plusBlockFor(e.company);
+  if (b && b.status === "ブロック") {
+    return `<div class="plus-block-box on">🚫 もういらない会社(メールは${b.mode === "迷惑メール" ? "迷惑メールに" : "無視"})
+      <button type="button" class="secondary icon" data-plus-unblock="${b.id}">戻す</button></div>`;
+  }
+  const done = phaseByKey[e.phase] && phaseByKey[e.phase].done;
+  return `<details class="plus-block-box">
+    <summary>🚫 この会社はもういらない</summary>
+    <div class="plus-muted" style="margin:4px 0 6px;">メール係が次から、この会社のメールを記録せずに飛ばします。</div>
+    <label class="plus-done"><input type="radio" name="plusBlockMode" value="無視" checked>無視する(メールはそのまま)</label>
+    <label class="plus-done"><input type="radio" name="plusBlockMode" value="迷惑メール">迷惑メールにする(Gmailが次から自動で振り分け)</label>
+    ${done ? "" : `<label class="plus-done" style="margin-top:4px;"><input type="checkbox" id="plusBlockDecline" checked>フェーズを「辞退」にする</label>`}
+    <button type="button" class="secondary danger" data-plus-block-entry="${e.id}" style="margin-top:6px;">もういらない会社にする</button>
+  </details>`;
+}
+async function plusBlock(args, declineEntryId) {
+  const r = await plusApi("block_set", { ...args, status: "ブロック" });
+  plus.block = (plus.block || []).filter(x => x.id !== r.id).concat([r]);
+  if (declineEntryId) {
+    entries = entries.map(e => e.id === declineEntryId ? { ...e, phase: "辞退", updatedAt: Date.now() } : e);
+    saveEntries();
+  }
+  plusRerender();
+  showToast(`${r.company} をもういらない会社にしました${declineEntryId ? "(辞退に変更)" : ""}`);
 }
 
 function plusKeyBannerHtml() {
@@ -238,6 +294,7 @@ function plusRenderModalSection(entryId) {
       <button type="button" class="secondary icon" data-plus-ask="${e.id}">🤖 ESビルダーで書く${f.es.some(x => !x.answer) ? "(空の設問を入れて開く)" : ""}</button>
     </div>
     ${f.queue.length ? `<div class="plus-wait-line">⏳ ${f.queue.map(q => `${escapeHtml(q.kind)}:${escapeHtml(q.status)}${q.note ? `(${escapeHtml(q.note)})` : ""}`).join(" / ")}</div>` : ""}
+    ${plusBlockFormHtml(e)}
   `;
 }
 function plusLogItemHtml(l) {
@@ -522,11 +579,16 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     .plus-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
     .plus-tags span { font-size: 11px; background: #f3f4f6; border-radius: 6px; padding: 1px 6px; color: #374151; }
     .plus-keybox input { font-size: 15px; }
+    .plus-block-box { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; font-size: 13px; background: #fff; }
+    .plus-block-box summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+    .plus-block-box.on { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+    .plus-block-box .plus-done { font-size: 13px; color: var(--text); padding: 2px 0; }
+    .plus-block-list summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); padding: 4px 0; }
   `;
   document.head.appendChild(style);
 
   document.addEventListener("click", async ev => {
-    const t = ev.target.closest("[data-plus-open],[data-plus-done],[data-plus-more],[data-plus-es],[data-plus-es-new],[data-plus-ask],[data-plus-copy],[data-plus-filter],[data-plus-view],[data-plus-dellog],[data-plus-expand],#plusKeySave,#plusLogAdd");
+    const t = ev.target.closest("[data-plus-open],[data-plus-done],[data-plus-more],[data-plus-es],[data-plus-es-new],[data-plus-ask],[data-plus-copy],[data-plus-filter],[data-plus-view],[data-plus-dellog],[data-plus-expand],[data-plus-keep],[data-plus-block-cand],[data-plus-unblock],[data-plus-block-entry],#plusKeySave,#plusLogAdd");
     if (!t) return;
     const ds = t.dataset;
     if (ds.plusOpen) { ev.stopPropagation(); openModal(ds.plusOpen); return; }
@@ -560,6 +622,29 @@ function plusOpenBuilder(company, entryId, program, esRows) {
       if (!confirm("この記録を消しますか?")) return;
       try { await plusApi("delete_log", { id: ds.plusDellog }); plus.log = plus.log.filter(x => x.id !== ds.plusDellog); plusRerender(); }
       catch (e) { showToast("消せませんでした: " + e.message); }
+      return;
+    }
+    if (ds.plusKeep || ds.plusBlockCand || ds.plusUnblock || ds.plusBlockEntry) {
+      t.disabled = true;
+      try {
+        if (ds.plusBlockEntry) {
+          const e = entries.find(x => x.id === ds.plusBlockEntry);
+          const mode = (document.querySelector('input[name="plusBlockMode"]:checked') || {}).value || "無視";
+          const dec = document.getElementById("plusBlockDecline");
+          await plusBlock({ company: e.company, entry_id: e.id, mode, reason: "アプリで「もういらない」" }, dec && dec.checked ? e.id : null);
+        } else if (ds.plusBlockCand) {
+          const b = plus.block.find(x => x.id === ds.plusBlockCand);
+          const e = b.entry_id ? entries.find(x => x.id === b.entry_id) : plusEntryForCompany(b.company);
+          const live = e && !(phaseByKey[e.phase] && phaseByKey[e.phase].done);
+          await plusBlock({ company: b.company }, live ? e.id : null);
+        } else {
+          const id = ds.plusKeep || ds.plusUnblock;
+          const b = plus.block.find(x => x.id === id);
+          const r = await plusApi("block_set", { company: b.company, status: "残す" });
+          Object.assign(b, r); plusRerender();
+          showToast(ds.plusKeep ? `${b.company} は残します(もう候補に出しません)` : `${b.company} のメールをまた記録します`);
+        }
+      } catch (err) { t.disabled = false; showToast("できませんでした: " + err.message); }
       return;
     }
     if (t.id === "plusKeySave") {
