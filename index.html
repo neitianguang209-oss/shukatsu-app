@@ -756,7 +756,7 @@
   </header>
   <div class="tab-bar">
     <button class="tab-btn active" data-tab="main">📋 選考管理</button>
-    <button class="tab-btn" data-tab="favored">★ 優遇IS</button>
+    <button class="tab-btn" data-tab="favored" style="display:none">★ 優遇IS</button>
     <button class="tab-btn" data-tab="es">✍️ ES</button>
   </div>
   <div id="plusUpcoming"></div>
@@ -1832,7 +1832,8 @@
     const b = e.webDeadline ? new Date(e.webDeadline).getTime() : null;
     const c = e.otherDeadline ? new Date(e.otherDeadline).getTime() : null;
     const d = typeof plusNextDueMs === "function" ? plusNextDueMs(e) : null;   // Claudeが記録した締切・予定
-    const arr = [a, b, c, d].filter(x => x !== null);
+    const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+    const arr = [a, b, c, d].filter(x => x !== null && x >= today0.getTime());
     return arr.length ? Math.min(...arr) : null;
   }
   function dayChipClass(d) {
@@ -1844,7 +1845,7 @@
   }
   function dayChipText(d) {
     if (d === null) return "";
-    if (d < 0) return `${Math.abs(d)}日前`;
+    if (d < 0) return "締切終了";
     if (d === 0) return "本日!";
     return `あと${d}日`;
   }
@@ -1921,9 +1922,9 @@
     if (filters.industry) items = items.filter(e => e.industry === filters.industry);
     if (filters.phase) items = items.filter(e => e.phase === filters.phase);
     // 完了フェーズ（内定/不合格/辞退）は通常非表示。ただしそのフェーズで絞り込み中、
-    // または「締切過ぎ・完了を表示」ONのときは表示する。
+    // または「締切過ぎ・完了を表示」ONのときは表示する。IS落ちは本選考につながるのでいつも出す。
     if (!showArchive && !filters.phase) {
-      items = items.filter(e => !phaseByKey[e.phase]?.done);
+      items = items.filter(e => !phaseByKey[e.phase]?.done || e.phase === "IS落ち");
     }
     items.sort((a, b) => {
       const aDone = phaseByKey[a.phase]?.done ? 1 : 0;
@@ -2005,11 +2006,10 @@
     const phase = phaseByKey[e.phase] || PHASES[0];
     const dMain = daysUntil(e.deadline);
     const dWeb = daysUntil(e.webDeadline);
-    const minD = [dMain, dWeb].filter(x => x !== null && !phase.done).reduce((a,b) => a===null?b:Math.min(a,b), null);
+    const minD = [dMain, dWeb].filter(x => x !== null && x >= 0 && !phase.done).reduce((a,b) => a===null?b:Math.min(a,b), null);
     let urgencyClass = "normal";
     if (phase.done) urgencyClass = "done";
     else if (minD === null) urgencyClass = "normal";
-    else if (minD < 0) urgencyClass = "expired";
     else if (minD <= 3) urgencyClass = "urgent";
     else if (minD <= 7) urgencyClass = "soon";
     const deadlineParts = [];
