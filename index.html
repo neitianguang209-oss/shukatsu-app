@@ -220,6 +220,20 @@
   }
   .filters .search { grid-column: 1 / -1; }
   .card-list { display: flex; flex-direction: column; gap: 8px; }
+  .quick-row { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; }
+  .quick-chip { background: #fff; color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 5px 11px; font-size: 12px; font-weight: 600; }
+  .quick-chip.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+  /* 併願:同じ会社のカードは並べて、左に細い線でつなぐ */
+  .card.sib-follow { margin-top: -4px; margin-left: 14px; }
+  .card.sib-follow::before { content: ""; position: absolute; left: -11px; top: -8px; bottom: 50%; width: 9px; border-left: 2px solid #c7d2fe; border-bottom: 2px solid #c7d2fe; border-bottom-left-radius: 6px; }
+  .sib-badge { display: inline-block; margin-left: 6px; background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; vertical-align: middle; cursor: pointer; }
+  /* ぎゅっと表示:1社1行 */
+  .card.compact { padding: 8px 10px; align-items: center; }
+  .card.compact .compact-row { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+  .card.compact .compact-name { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+  .card.compact .compact-name small { font-weight: 500; color: var(--primary); margin-left: 4px; }
+  .card.compact .compact-due { font-size: 12px; white-space: nowrap; color: var(--muted); }
+  .card.compact .phase-badge { flex-shrink: 0; }
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -771,6 +785,11 @@
       <option value="name">企業名順</option>
       <option value="created">追加が新しい順</option>
     </select>
+    <div class="quick-row">
+      <button type="button" class="quick-chip" id="quickSoon">⏰ 7日以内の締切だけ</button>
+      <button type="button" class="quick-chip" id="quickActive">🔥 選考が進んでいるだけ</button>
+      <button type="button" class="quick-chip" id="compactToggle">☰ ぎゅっと表示</button>
+    </div>
   </div>
   <div id="list" class="card-list"></div>
   <div id="esView" style="display:none"></div>
@@ -877,6 +896,7 @@
       <button type="button" class="secondary icon" id="reviewAddBtn" style="margin-top:6px;">＋ 振り返りを追加</button>
     </div>
     <div id="plusSection" style="display:none"></div>
+    <button type="button" class="secondary" id="siblingAddBtn" style="display:none;width:100%;margin-top:10px;">＋ この会社で別の応募を追加(併願:別コース・本選考など)</button>
     <div class="modal-actions">
       <button class="secondary danger" id="deleteBtn" style="display:none">削除</button>
       <div class="right">
@@ -1016,7 +1036,7 @@
     <div id="dupList" style="background:#f9fafb;border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:14px;font-size:13px;max-height:200px;overflow-y:auto;"></div>
     <div class="modal-actions" style="flex-direction:column;gap:8px;">
       <button id="dupOverwriteBtn" style="width:100%">既存を上書きする（内容を更新）</button>
-      <button class="secondary" id="dupAddBtn" style="width:100%">別の企業として新規追加</button>
+      <button class="secondary" id="dupAddBtn" style="width:100%">別の応募(併願)として新しいカードを作る</button>
       <button class="secondary" id="dupCancelBtn" style="width:100%">キャンセル（編集に戻る）</button>
     </div>
   </div>
@@ -1214,11 +1234,48 @@
     // クラウドが空だった分は端末に残っているデータをアップロードする
     for (const kind of ["selection", "favored"]) if (pushUp[kind]) scheduleCloudPush(kind);
   }
+  // 端末で消したカードのID(クラウドとの突き合わせで生き返らせないため)
+  const DELETED_KEY = "shukatsu:deletedIds";
+  function deletedIds() {
+    try { return new Set(JSON.parse(localStorage.getItem(DELETED_KEY) || "[]")); } catch { return new Set(); }
+  }
+  function rememberDeleted(ids) {
+    const s = deletedIds();
+    ids.forEach(id => s.add(id));
+    try { localStorage.setItem(DELETED_KEY, JSON.stringify(Array.from(s).slice(-500))); } catch {}
+  }
+  // 送る直前にクラウドの最新を読み、スマホのClaude・メール係が足したカードや、よそで新しく直されたカードを取りこぼさない
+  async function mergeWithCloud(kind, payload) {
+    let row;
+    try { row = await selectRow(kind); } catch (e) { return { payload, changed: false }; }
+    const cloud = (row && row.data && Array.isArray(row.data.list)) ? row.data.list : [];
+    if (!cloud.length) return { payload, changed: false };
+    const del = deletedIds();
+    const byId = new Map(payload.map((x, i) => [x.id, i]));
+    const out = payload.slice();
+    let changed = false;
+    for (const c of cloud) {
+      if (!c || !c.id || del.has(c.id)) continue;
+      if (!byId.has(c.id)) { out.push(c); changed = true; continue; }
+      const i = byId.get(c.id);
+      if ((c.updatedAt || 0) > (out[i].updatedAt || 0)) { out[i] = c; changed = true; }
+    }
+    return { payload: out, changed };
+  }
   async function cloudPush(kind) {
     if (!sb || !booted || !cloudUser || !rowId[kind]) return;
     let payload;
     try { payload = await toCloudList(listForKind(kind)); }
     catch (e) { console.warn("img upload", e); try { showToast("画像アップロード失敗: " + (e.message || e)); } catch (_) {} return; }
+    if (kind === "selection") {
+      const m = await mergeWithCloud(kind, payload);
+      payload = m.payload;
+      if (m.changed) {
+        setKind(kind, await fromCloudList(payload));
+        saveEntriesLocal();
+        try { renderAll(); } catch (_) {}
+      }
+    }
     const { error } = await sb.from("shukatsu_items").update({ data: { list: payload }, updated_at: new Date().toISOString() }).eq("id", rowId[kind]);
     if (error) { console.warn("cloud push", kind, error); try { showToast("同期エラー: " + (error.message || error.code || "unknown")); } catch (_) {} return; }
     dirty[kind] = false;
@@ -1582,6 +1639,13 @@
   let filters = { search: "", industry: "", phase: "", perkType: "", source: "" };
   let sortBy = "deadline";
   let showArchive = false;
+  // 一覧の見やすさ(端末に覚えておく)
+  const ACTIVE_PHASES = ["ES", "IS選考中", "インターン通過", "一次", "二次", "最終"];
+  function viewPref(k) { try { return localStorage.getItem("shukatsu:view:" + k) === "1"; } catch { return false; } }
+  function setViewPref(k, v) { try { localStorage.setItem("shukatsu:view:" + k, v ? "1" : "0"); } catch {} }
+  let compactView = viewPref("compact");
+  let quickSoon = false;
+  let quickActive = false;
   let selectionMode = false;
   const selectedIds = new Set();
   const expandedMemos = new Set();
@@ -1698,6 +1762,10 @@
       mypagePassword: String(e.mypagePassword || ""),
       selectionPlan: String(e.selectionPlan || ""),
       memo: String(e.memo || ""),
+      // 済みにした締切("es:2026-11-20" / "web:…" / "other:…")、次の予定なしでOKにしたフェーズ、どこから入ったか
+      doneDue: Array.isArray(e.doneDue) ? e.doneDue.filter(s => typeof s === "string") : [],
+      nextOk: String(e.nextOk || ""),
+      source: String(e.source || ""),
       images: Array.isArray(e.images) ? e.images.filter(s => typeof s === "string" && (s.startsWith("data:image/") || s.startsWith("http"))) : [],
       reviews: Array.isArray(e.reviews) ? e.reviews.map(r => ({
         id: r.id || uid(),
@@ -1827,10 +1895,11 @@
     const qg = aliasGroupsFor(query);
     return qg.some(g => cg.includes(g));
   }
+  function dueDone(e, k, d) { return !!d && Array.isArray(e.doneDue) && e.doneDue.includes(`${k}:${d}`); }
   function effectiveDeadline(e) {
-    const a = e.deadline ? new Date(e.deadline).getTime() : null;
-    const b = e.webDeadline ? new Date(e.webDeadline).getTime() : null;
-    const c = e.otherDeadline ? new Date(e.otherDeadline).getTime() : null;
+    const a = e.deadline && !dueDone(e, "es", e.deadline) ? new Date(e.deadline).getTime() : null;
+    const b = e.webDeadline && !dueDone(e, "web", e.webDeadline) ? new Date(e.webDeadline).getTime() : null;
+    const c = e.otherDeadline && !dueDone(e, "other", e.otherDeadline) ? new Date(e.otherDeadline).getTime() : null;
     const d = typeof plusNextDueMs === "function" ? plusNextDueMs(e) : null;   // Claudeが記録した締切・予定
     const today0 = new Date(); today0.setHours(0, 0, 0, 0);
     const arr = [a, b, c, d].filter(x => x !== null && x >= today0.getTime());
@@ -1926,6 +1995,11 @@
     if (!showArchive && !filters.phase) {
       items = items.filter(e => !phaseByKey[e.phase]?.done || e.phase === "IS落ち");
     }
+    if (quickSoon) {
+      const lim = Date.now() + 8 * 86400000;
+      items = items.filter(e => { const d = effectiveDeadline(e); return d !== null && d <= lim && !phaseByKey[e.phase]?.done; });
+    }
+    if (quickActive) items = items.filter(e => ACTIVE_PHASES.includes(e.phase));
     items.sort((a, b) => {
       const aDone = phaseByKey[a.phase]?.done ? 1 : 0;
       const bDone = phaseByKey[b.phase]?.done ? 1 : 0;
@@ -1955,7 +2029,31 @@
       updateSelectionBar();
       return;
     }
-    list.innerHTML = items.map(e => renderCard(e)).join("");
+    // 併願(同じ会社の別カード)は、いちばん上に来たカードのすぐ下に並べる
+    const groups = new Map();
+    items.forEach(e => {
+      const k = normalizeCompanyName(e.company);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e);
+    });
+    const ordered = [];
+    for (const g of groups.values()) g.forEach((e, i) => ordered.push({ e, follow: i > 0 }));
+    list.innerHTML = ordered.map(o => renderCard(o.e, o.follow)).join("");
+    list.querySelectorAll("[data-sib-company]").forEach(b => {
+      b.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const name = b.dataset.sibCompany;
+        filters.search = name;
+        document.getElementById("searchInput").value = name;
+        renderList();
+      });
+    });
+    list.querySelectorAll(".card.compact").forEach(c => {
+      c.addEventListener("click", (ev) => {
+        if (ev.target.closest("button,a,input,[data-plus-open]")) return;
+        if (!selectionMode) openModal(c.dataset.id);
+      });
+    });
     list.querySelectorAll('button[data-action="edit"]').forEach(btn => {
       btn.addEventListener("click", () => openModal(btn.dataset.id));
     });
@@ -2002,10 +2100,43 @@
     });
     updateSelectionBar();
   }
-  function renderCard(e) {
+  // 同じ会社のほかのカード(併願)
+  function siblingsOf(e) {
+    const k = normalizeCompanyName(e.company);
+    return entries.filter(x => x.id !== e.id && normalizeCompanyName(x.company) === k);
+  }
+  function sibBadgeHtml(e) {
+    const sibs = siblingsOf(e);
+    if (!sibs.length) return "";
+    const names = sibs.map(s => s.program || "コース未記入").join("・");
+    return `<span class="sib-badge" data-sib-company="${escapeHtml(e.company)}" title="${escapeHtml(names)}">併願 ${sibs.length + 1}</span>`;
+  }
+  function nearestDueText(e) {
+    const ms = effectiveDeadline(e);
+    if (ms === null) return "";
+    const d = new Date(ms);
+    const days = daysUntil(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+    return { text: `${d.getMonth() + 1}/${d.getDate()}`, chip: { cls: dayChipClass(days), text: dayChipText(days) } };
+  }
+  function renderCompactCard(e, follow) {
     const phase = phaseByKey[e.phase] || PHASES[0];
-    const dMain = daysUntil(e.deadline);
-    const dWeb = daysUntil(e.webDeadline);
+    const due = phase.done ? "" : nearestDueText(e);
+    const urg = phase.done ? "done" : (due && due.chip.cls === "urgent" ? "urgent" : due && due.chip.cls === "soon" ? "soon" : "normal");
+    const checkbox = selectionMode ? `<input type="checkbox" class="card-check" data-id="${e.id}" ${selectedIds.has(e.id) ? "checked" : ""}>` : "";
+    return `<div class="card compact ${urg}${follow ? " sib-follow" : ""}${selectionMode && selectedIds.has(e.id) ? " selected" : ""}" data-id="${e.id}">
+      ${checkbox}
+      <div class="compact-row">
+        <span class="phase-badge" style="background:${phase.color}">${phase.label}</span>
+        <span class="compact-name">${escapeHtml(e.company || "(無題)")}${e.program ? `<small>${escapeHtml(e.program)}</small>` : ""}</span>
+        ${due ? `<span class="compact-due">${escapeHtml(due.text)}</span><span class="days-left ${due.chip.cls}">${escapeHtml(due.chip.text)}</span>` : ""}
+      </div>
+    </div>`;
+  }
+  function renderCard(e, follow) {
+    if (compactView) return renderCompactCard(e, follow);
+    const phase = phaseByKey[e.phase] || PHASES[0];
+    const dMain = dueDone(e, "es", e.deadline) ? null : daysUntil(e.deadline);
+    const dWeb = dueDone(e, "web", e.webDeadline) ? null : daysUntil(e.webDeadline);
     const minD = [dMain, dWeb].filter(x => x !== null && x >= 0 && !phase.done).reduce((a,b) => a===null?b:Math.min(a,b), null);
     let urgencyClass = "normal";
     if (phase.done) urgencyClass = "done";
@@ -2014,7 +2145,7 @@
     else if (minD <= 7) urgencyClass = "soon";
     const deadlineParts = [];
     if (e.deadline) {
-      const chip = deadlineChip(e.deadline, e.deadlineTime);
+      const chip = dueDone(e, "es", e.deadline) ? { cls: "normal", text: "✓ 済み" } : deadlineChip(e.deadline, e.deadlineTime);
       const timeStr = e.deadlineTime ? ` ${escapeHtml(e.deadlineTime)}` : "";
       deadlineParts.push(`
         <span class="deadline-item">
@@ -2024,7 +2155,7 @@
         </span>`);
     }
     if (e.webDeadline || e.webMethod) {
-      const chip = e.webDeadline ? deadlineChip(e.webDeadline, e.webDeadlineTime) : null;
+      const chip = e.webDeadline ? (dueDone(e, "web", e.webDeadline) ? { cls: "normal", text: "✓ 済み" } : deadlineChip(e.webDeadline, e.webDeadlineTime)) : null;
       const timeStr = e.webDeadlineTime ? ` ${escapeHtml(e.webDeadlineTime)}` : "";
       const dateStr = e.webDeadline ? `🖥️ ${formatDate(e.webDeadline)}${timeStr}` : "🖥️ (締切未設定)";
       let methodBadge = "";
@@ -2042,7 +2173,7 @@
         </span>`);
     }
     if (e.otherDeadline || e.otherLabel) {
-      const chip = e.otherDeadline ? deadlineChip(e.otherDeadline, e.otherDeadlineTime) : null;
+      const chip = e.otherDeadline ? (dueDone(e, "other", e.otherDeadline) ? { cls: "normal", text: "✓ 済み" } : deadlineChip(e.otherDeadline, e.otherDeadlineTime)) : null;
       const timeStr = e.otherDeadlineTime ? ` ${escapeHtml(e.otherDeadlineTime)}` : "";
       const labelStr = e.otherLabel ? escapeHtml(e.otherLabel) : "その他";
       const dateStr = e.otherDeadline ? `🎬 ${formatDate(e.otherDeadline)}${timeStr}` : "";
@@ -2118,12 +2249,12 @@
       }</div>`;
     }
     return `
-      <div class="card ${urgencyClass}${selectedClass}" data-id="${e.id}">
+      <div class="card ${urgencyClass}${selectedClass}${follow ? " sib-follow" : ""}" data-id="${e.id}">
         ${checkbox}
         <div class="card-body">
           <div class="card-top">
             <div style="min-width:0;flex:1">
-              <div class="card-company">${escapeHtml(e.company || "(無題)")}${e.program ? `<span class="program-badge">${escapeHtml(e.program)}</span>` : ""}</div>
+              <div class="card-company">${escapeHtml(e.company || "(無題)")}${e.program ? `<span class="program-badge">${escapeHtml(e.program)}</span>` : ""}${sibBadgeHtml(e)}</div>
               ${e.industry ? `<div class="card-industry">${escapeHtml(e.industry)}</div>` : ""}
             </div>
             <div class="card-actions">
@@ -2399,6 +2530,7 @@
     currentReviews = Array.isArray(data.reviews) ? data.reviews.map(r => ({ ...r })) : [];
     renderReviewEditor();
     document.getElementById("deleteBtn").style.display = e ? "" : "none";
+    document.getElementById("siblingAddBtn").style.display = e ? "" : "none";
     if (typeof plusRenderModalSection === "function") plusRenderModalSection(e ? e.id : null);
     const det = document.querySelector(".form-section");
     det.open = !!(data.mypageUrl || data.mypageId || data.mypagePassword);
@@ -2426,8 +2558,10 @@
       if (nameNorm && normalizeCompanyName(e.company) === nameNorm && progNorm === (e.program || "").trim()) {
         reasons.push(progNorm ? "企業名・コース" : "企業名");
       }
-      if (data.mypageId && e.mypageId && data.mypageId.trim() === e.mypageId.trim()) reasons.push("マイページID");
-      if (data.mypageUrl && e.mypageUrl && data.mypageUrl.trim() === e.mypageUrl.trim()) reasons.push("マイページURL");
+      // 同じマイページでもコースが違えば併願(1つのマイページから複数のインターン・本選考に出すことが多い)
+      const otherCourse = progNorm !== (e.program || "").trim();
+      if (!otherCourse && data.mypageId && e.mypageId && data.mypageId.trim() === e.mypageId.trim()) reasons.push("マイページID");
+      if (!otherCourse && data.mypageUrl && e.mypageUrl && data.mypageUrl.trim() === e.mypageUrl.trim()) reasons.push("マイページURL");
       if (reasons.length) matches.push({ entry: e, reasons });
     }
     return matches;
@@ -2524,6 +2658,7 @@
   function deleteFromModal() {
     if (!editingId) return;
     if (!confirm("この企業を削除しますか？")) return;
+    rememberDeleted([editingId]);
     entries = entries.filter(x => x.id !== editingId);
     saveEntries();
     closeModal();
@@ -2815,6 +2950,7 @@
   function bulkDelete() {
     if (selectedIds.size === 0) return;
     if (!confirm(`${selectedIds.size}件を削除しますか？`)) return;
+    rememberDeleted(Array.from(selectedIds));
     entries = entries.filter(e => !selectedIds.has(e.id));
     saveEntries();
     showToast(`${selectedIds.size}件を削除しました`);
@@ -3613,6 +3749,15 @@
     commitSave(data, null, null);
     pendingSave = null;
   });
+  // 併願: 同じ会社の新しいカードを、会社名・業界・マイページだけ引き継いで開く
+  document.getElementById("siblingAddBtn").addEventListener("click", () => {
+    const src = entries.find(x => x.id === editingId);
+    if (!src) return;
+    closeModal();
+    openModal(null, { company: src.company, industry: src.industry, mypageUrl: src.mypageUrl, mypageId: src.mypageId, phase: "エントリー" });
+    document.getElementById("modalTitle").textContent = `${src.company} の別の応募を追加`;
+    setTimeout(() => document.getElementById("f_program").focus(), 80);
+  });
   document.getElementById("dupCancelBtn").addEventListener("click", () => {
     document.getElementById("dupModal").classList.remove("open");
     pendingSave = null;
@@ -3648,6 +3793,15 @@
       renderFavoredList();
     }
   });
+  function syncQuickChips() {
+    document.getElementById("quickSoon").classList.toggle("on", quickSoon);
+    document.getElementById("quickActive").classList.toggle("on", quickActive);
+    document.getElementById("compactToggle").classList.toggle("on", compactView);
+  }
+  syncQuickChips();
+  document.getElementById("quickSoon").addEventListener("click", () => { quickSoon = !quickSoon; syncQuickChips(); renderList(); });
+  document.getElementById("quickActive").addEventListener("click", () => { quickActive = !quickActive; syncQuickChips(); renderList(); });
+  document.getElementById("compactToggle").addEventListener("click", () => { compactView = !compactView; setViewPref("compact", compactView); syncQuickChips(); renderList(); });
   document.getElementById("sortBy").addEventListener("change", (e) => {
     sortBy = e.target.value;
     if (currentTab === "main") renderList(); else renderFavoredList();
@@ -3796,7 +3950,7 @@
     }
   })();
 </script>
-<script src="shukatsu-plus.js?v=3"></script>
+<script src="shukatsu-plus.js?v=4"></script>
 <script src="es-builder.js?v=3"></script>
 </body>
 </html>

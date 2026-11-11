@@ -158,6 +158,69 @@ function plusShowBuilderView() {
   if (b) b.style.display = currentTab === "es" && plusEsView === "builder" && plusReady ? "" : "none";
 }
 
+// 会社カードに入っている締切(ES提出・Webテスト・その他)を、記録の締切と同じ形にする
+const PLUS_CARD_DUE_KEYS = [["es", "deadline", "deadlineTime"], ["web", "webDeadline", "webDeadlineTime"], ["other", "otherDeadline", "otherDeadlineTime"]];
+function plusCardDues() {
+  const out = [];
+  for (const e of entries) {
+    if (phaseByKey[e.phase] && phaseByKey[e.phase].done) continue;
+    for (const [k, dk, tk] of PLUS_CARD_DUE_KEYS) {
+      const d = e[dk];
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d || "")) continue;
+      const title = k === "es" ? "ES提出" : k === "web" ? `Webテスト${e.webMethod ? `(${e.webMethod})` : ""}` : (e.otherLabel || "締切");
+      out.push({ card: true, key: `${e.id}|${k}|${d}`, e, k, d, kind: "締切", company: e.company + (e.program ? ` ${e.program}` : ""),
+                 title, due_at: plusToIso(d, e[tk]), done: dueDone(e, k, d) });
+    }
+  }
+  return out;
+}
+// 締切漏れの見張り:過ぎたのに済みになっていない / 選考中なのに次の予定がない
+function plusCheckItems() {
+  const now = Date.now(), from = now - 14 * 86400000;
+  const overdue = [];
+  plus.log.forEach(l => {
+    if (l.done || l.kind !== "締切" || !l.due_at) return;
+    const t = new Date(l.due_at).getTime();
+    if (t < now && t > from) overdue.push(l);
+  });
+  plusCardDues().forEach(c => {
+    if (c.done || !["エントリー", "ES"].includes(c.e.phase)) return;
+    const end = new Date(plusToIso(c.d, "23:59")).getTime();
+    if (end < now && end > from) overdue.push(c);
+  });
+  overdue.sort((a, b) => new Date(a.due_at) - new Date(b.due_at));
+  const noNext = entries.filter(e => ["ES", "一次", "二次", "最終"].includes(e.phase) && e.nextOk !== e.phase && effectiveDeadline(e) === null);
+  return { overdue, noNext };
+}
+function plusDueRowHtml(x, extra) {
+  const chip = plusChip(x.due_at);
+  const e = x.card ? x.e : entries.find(y => plusMatch(x, y));
+  const btn = x.card ? `<button class="plus-check" data-card-done="${escapeHtml(x.key)}" title="済みにする">✓</button>`
+                     : `<button class="plus-check" data-plus-done="${x.id}" title="済みにする">✓</button>`;
+  return `<div class="plus-up-row">
+    ${btn}
+    <div class="plus-up-main" ${e ? `data-plus-open="${e.id}"` : ""}>
+      <div><b>${escapeHtml(plusDueText(x.due_at))}</b> ${chip ? `<span class="days-left ${chip.cls}">${escapeHtml(chip.text)}</span>` : ""}${extra || ""}</div>
+      <div class="plus-up-title">${PLUS_LOG_ICON[x.kind] || "⏰"} ${escapeHtml(x.company)}　${escapeHtml(x.title)}</div>
+    </div>
+  </div>`;
+}
+function plusCheckPanelHtml() {
+  const { overdue, noNext } = plusCheckItems();
+  if (!overdue.length && !noNext.length) return "";
+  return `<div class="plus-panel plus-alert">
+    <div class="plus-panel-head">⚠ 要チェック<span>${overdue.length + noNext.length}件</span></div>
+    ${overdue.length ? `<div class="plus-muted">締切が過ぎたのに「済み」になっていません。出していたら ✓ を押してください。</div>
+      ${overdue.map(x => plusDueRowHtml(x)).join("")}` : ""}
+    ${noNext.length ? `<div class="plus-muted" style="margin-top:6px;">選考中なのに、次の締切・予定が入っていません。メールやマイページを確かめてください。</div>
+      ${noNext.map(e => `<div class="plus-up-row">
+        <div class="plus-up-main" data-plus-open="${e.id}"><div class="plus-up-title"><b>${escapeHtml(e.company)}</b>${e.program ? ` <span class="plus-muted">${escapeHtml(e.program)}</span>` : ""}</div>
+          <div class="plus-muted">フェーズ: ${escapeHtml(e.phase)}</div></div>
+        <button class="secondary icon" data-next-ok="${e.id}">今は予定なし</button>
+      </div>`).join("")}` : ""}
+  </div>`;
+}
+
 function plusRenderUpcoming() {
   plusShowBuilderView();
   const el = document.getElementById("plusUpcoming");
@@ -165,28 +228,22 @@ function plusRenderUpcoming() {
   if (currentTab !== "main") { el.innerHTML = ""; return; }
   if (!plusReady) { el.innerHTML = plusError === "nokey" ? plusKeyBannerHtml() : ""; return; }
   const limit = Date.now() + 14 * 86400000;
-  const items = plusOpenLogs(plus.log).filter(l => new Date(l.due_at).getTime() <= limit);
-  const waiting = plus.queue.filter(q => q.status === "待ち").length;
+  const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+  const cardItems = plusCardDues().filter(c => !c.done && new Date(c.due_at).getTime() >= today0.getTime() && new Date(c.due_at).getTime() <= limit);
+  const logItems = plusOpenLogs(plus.log).filter(l => { const t = new Date(l.due_at).getTime(); return t <= limit && t >= today0.getTime(); });
+  const items = cardItems.concat(logItems).sort((a, b) => new Date(a.due_at) - new Date(b.due_at));
+  const waitingQ = plus.queue.filter(q => q.status === "待ち");
+  const checkHtml = plusCheckPanelHtml();
   const blockHtml = plusBlockPanelHtml();
-  if (!items.length && !waiting) { el.innerHTML = blockHtml; return; }
+  if (!items.length && !waitingQ.length) { el.innerHTML = checkHtml + blockHtml; return; }
   const expanded = el.dataset.expanded === "1";
-  const shown = expanded ? items : items.slice(0, 5);
-  el.innerHTML = `
+  const shown = expanded ? items : items.slice(0, 6);
+  el.innerHTML = checkHtml + `
     <div class="plus-panel">
-      <div class="plus-panel-head">これから2週間<span>${items.length}件</span></div>
-      ${shown.map(l => {
-        const chip = plusChip(l.due_at);
-        const e = entries.find(x => plusMatch(l, x));
-        return `<div class="plus-up-row">
-          <button class="plus-check" data-plus-done="${l.id}" title="済みにする">✓</button>
-          <div class="plus-up-main" ${e ? `data-plus-open="${e.id}"` : ""}>
-            <div><b>${escapeHtml(plusDueText(l.due_at))}</b> ${chip ? `<span class="days-left ${chip.cls}">${escapeHtml(chip.text)}</span>` : ""}</div>
-            <div class="plus-up-title">${PLUS_LOG_ICON[l.kind]} ${escapeHtml(l.company)}　${escapeHtml(l.title)}</div>
-          </div>
-        </div>`;
-      }).join("")}
-      ${items.length > 5 ? `<button class="plus-more" data-plus-more>${expanded ? "たたむ" : `ほか${items.length - 5}件を見る`}</button>` : ""}
-      ${waiting ? `<div class="plus-wait-line">⏳ Claudeの待ち ${waiting}件(ESの下書き・登録)</div>` : ""}
+      <div class="plus-panel-head">これから2週間の締切・予定<span>${items.length}件</span></div>
+      ${shown.map(x => plusDueRowHtml(x)).join("")}
+      ${items.length > 6 ? `<button class="plus-more" data-plus-more>${expanded ? "たたむ" : `ほか${items.length - 6}件を見る`}</button>` : ""}
+      ${waitingQ.length ? `<div class="plus-wait-line">⏳ Claudeの待ち ${waitingQ.length}件:${waitingQ.slice(0, 4).map(q => `${escapeHtml(q.company)}(${escapeHtml(q.kind)})`).join("、")}${waitingQ.length > 4 ? " ほか" : ""}<br>パソコンで「就活やって」と言うと進みます</div>` : ""}
     </div>${blockHtml}`;
 }
 
@@ -532,6 +589,8 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     .plus-more { background: none; color: var(--primary); padding: 4px 0; font-size: 12px; }
     .plus-wait-line { margin-top: 6px; font-size: 12px; color: #92400e; background: #fffbeb; border-radius: 8px; padding: 6px 8px; line-height: 1.6; }
     .plus-muted { color: var(--muted); font-size: 12px; font-weight: 400; }
+    .plus-panel.plus-alert { border-color: #fca5a5; background: #fff7f7; }
+    .plus-panel.plus-alert .plus-panel-head { color: #b91c1c; }
     .plus-card-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; font-size: 12px; cursor: pointer; }
     .plus-next { background: #eef2ff; color: #3730a3; border-radius: 8px; padding: 3px 8px; font-weight: 600; }
     .plus-badge { background: #f3f4f6; color: var(--muted); border-radius: 999px; padding: 2px 8px; font-weight: 600; }
@@ -588,9 +647,22 @@ function plusOpenBuilder(company, entryId, program, esRows) {
   document.head.appendChild(style);
 
   document.addEventListener("click", async ev => {
-    const t = ev.target.closest("[data-plus-open],[data-plus-done],[data-plus-more],[data-plus-es],[data-plus-es-new],[data-plus-ask],[data-plus-copy],[data-plus-filter],[data-plus-view],[data-plus-dellog],[data-plus-expand],[data-plus-keep],[data-plus-block-cand],[data-plus-unblock],[data-plus-block-entry],#plusKeySave,#plusLogAdd");
+    const t = ev.target.closest("[data-card-done],[data-next-ok],[data-plus-open],[data-plus-done],[data-plus-more],[data-plus-es],[data-plus-es-new],[data-plus-ask],[data-plus-copy],[data-plus-filter],[data-plus-view],[data-plus-dellog],[data-plus-expand],[data-plus-keep],[data-plus-block-cand],[data-plus-unblock],[data-plus-block-entry],#plusKeySave,#plusLogAdd");
     if (!t) return;
     const ds = t.dataset;
+    if (ds.cardDone || ds.nextOk) {
+      ev.stopPropagation();
+      const [id, k, d] = (ds.cardDone || ds.nextOk).split("|");
+      entries = entries.map(e => {
+        if (e.id !== id) return e;
+        if (ds.cardDone) return { ...e, doneDue: Array.from(new Set((e.doneDue || []).concat([`${k}:${d}`]))), updatedAt: Date.now() };
+        return { ...e, nextOk: e.phase, updatedAt: Date.now() };
+      });
+      saveEntries();
+      plusRerender();
+      showToast(ds.cardDone ? "済みにしました(リマインドも止まります)" : "このフェーズの間は出しません");
+      return;
+    }
     if (ds.plusOpen) { ev.stopPropagation(); openModal(ds.plusOpen); return; }
     if (ds.plusDone) {
       t.disabled = true;
