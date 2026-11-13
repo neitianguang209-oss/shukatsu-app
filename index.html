@@ -1229,11 +1229,21 @@
     booted = true;
     renderAll();
     subscribeRealtime();
+    openEntryFromHash();
     // one-time: shrink any legacy rows that still hold base64 images
     for (const kind of ["selection", "favored"]) if (needMigrate[kind]) scheduleCloudPush(kind);
     // クラウドが空だった分は端末に残っているデータをアップロードする
     for (const kind of ["selection", "favored"]) if (pushUp[kind]) scheduleCloudPush(kind);
   }
+  // ToDo「ES締め切り」のリンク(#e=カードのID)から来たら、その会社の編集画面を開く
+  function openEntryFromHash() {
+    const m = location.hash.match(/(?:^#|&)e=([^&]+)/);
+    if (!m) return;
+    const id = decodeURIComponent(m[1]);
+    history.replaceState(null, "", location.pathname + location.search);
+    if (entries.some(x => x.id === id)) openModal(id);
+  }
+  window.addEventListener("hashchange", () => { if (booted) openEntryFromHash(); });
   // 端末で消したカードのID(クラウドとの突き合わせで生き返らせないため)
   const DELETED_KEY = "shukatsu:deletedIds";
   function deletedIds() {
