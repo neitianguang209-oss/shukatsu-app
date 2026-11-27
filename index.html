@@ -730,10 +730,10 @@
   </div>
   <div style="font-size:20px;font-weight:800;color:#1f2430;">就活選考管理</div>
   <div id="authMsg" style="font-size:13px;color:#6b7280;max-width:290px;line-height:1.7;">データを読み込んでいます...</div>
-  <button id="googleLoginBtn" style="display:inline-flex;align-items:center;gap:10px;background:#fff;border:1px solid #dadce0;border-radius:10px;padding:12px 22px;font-size:15px;font-weight:600;color:#3c4043;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.1);">
-    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.02-3.7H.96v2.34A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.98 10.72a5.4 5.4 0 0 1 0-3.44V4.94H.96a9 9 0 0 0 0 8.12l3.02-2.34z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.5.46 3.44 1.35l2.58-2.58C13.47.9 11.43 0 9 0A9 9 0 0 0 .96 4.94l3.02 2.34C4.68 5.16 6.66 3.58 9 3.58z"/></svg>
-    Googleでログイン
-  </button>
+  <form id="keyForm" style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:290px;">
+    <input type="password" id="gateKeyInput" placeholder="合言葉（リンクを貼ってもOK）" autocomplete="current-password" autocapitalize="off" spellcheck="false" style="font-size:16px;padding:12px;border:1px solid #dadce0;border-radius:10px;">
+    <button type="submit" style="background:#4f46e5;color:#fff;border:0;border-radius:10px;padding:12px;font-size:15px;font-weight:700;cursor:pointer;">つなぐ</button>
+  </form>
   <div id="authError" style="font-size:12px;color:#dc2626;display:none;max-width:290px;"></div>
 </div>
 <div id="syncOverlay" style="position:fixed;inset:0;z-index:9998;background:rgba(246,247,251,.92);display:none;align-items:center;justify-content:center;flex-direction:column;gap:12px;font-family:system-ui,sans-serif;">
@@ -1134,6 +1134,24 @@
   let rtChannel = null, rtTimer = null;
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+  // ---- 合言葉（じぶん・家計簿などと共通）。クラウドの読み書きはこれが無いとできない
+  function itemsKey() {
+    try { return localStorage.getItem("shukatsu:key") || localStorage.getItem("jibun-note:key") || ""; } catch { return ""; }
+  }
+  async function itemsApi(action, args) {
+    const { data, error } = await sb.rpc("shukatsu_items_api", { p_key: itemsKey(), p_action: action, p_args: args || {} });
+    if (error) throw new Error(/bad key/.test(error.message || "") ? "bad key" : (error.message || "error"));
+    return data;
+  }
+  async function imgApi(body) {
+    const res = await fetch(SUPABASE_URL + "/functions/v1/shukatsu-img", {
+      method: "POST", headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY, "x-kb-key": itemsKey() }, body: JSON.stringify(body)
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(out.error || ("画像 " + res.status));
+    return out;
+  }
+
   // ---- Image storage (keeps the synced JSON tiny; images live in Storage) ----
   const IMG_BUCKET = "entry-images";
   const SIGN_TTL = 60 * 60 * 24 * 7;         // signed URL valid 7 days
@@ -1150,19 +1168,13 @@
     return { blob: new Blob([arr], { type: mime }), ext };
   }
   async function uploadDataUrl(dataUrl) {
-    const { blob, ext } = dataUrlToBlob(dataUrl);
-    const path = cloudUser.id + "/" + uid2() + "." + ext;
-    const { error } = await sb.storage.from(IMG_BUCKET).upload(path, blob, { contentType: blob.type, upsert: false });
-    if (error) throw error;
-    return path;
+    return (await imgApi({ action: "upload", dataUrl })).path;
   }
   async function signPaths(paths) {
     const uniq = [...new Set(paths)];
     if (!uniq.length) return {};
-    const { data, error } = await sb.storage.from(IMG_BUCKET).createSignedUrls(uniq, SIGN_TTL);
-    const map = {};
-    if (!error && data) data.forEach(d => { if (d && d.signedUrl && d.path) map[d.path] = d.signedUrl; });
-    return map;
+    try { return (await imgApi({ action: "sign", paths: uniq })).urls || {}; }
+    catch (e) { console.warn("img sign", e); return {}; }
   }
   // display list (base64 / signed urls)  ->  cloud list (small: storage paths)
   async function toCloudList(list) {
@@ -1206,9 +1218,7 @@
     return norm;
   }
   async function selectRow(kind) {
-    const { data, error } = await sb.from("shukatsu_items").select("id,data").eq("kind", kind).limit(1);
-    if (error) throw error;
-    return (data && data[0]) || null;
+    return (await itemsApi("select", { kind })) || null;
   }
   async function cloudBoot() {
     if (!sb || !cloudUser) return;
@@ -1219,7 +1229,7 @@
       let row = null, ok = false, lastErr = null;
       for (let a = 0; a < 3 && !ok; a++) {
         try { row = await selectRow(kind); ok = true; }
-        catch (e) { lastErr = e; await sleep(600); }
+        catch (e) { lastErr = e; if (e.message === "bad key") break; await sleep(600); }
       }
       if (!ok) throw lastErr || new Error("cloud read failed");
       if (row) {
@@ -1234,8 +1244,9 @@
         }
       } else {
         const seed = await toCloudList(listForKind(kind));
-        const { data, error } = await sb.from("shukatsu_items").insert({ user_id: cloudUser.id, kind, data: { list: seed } }).select("id").limit(1);
-        if (!error && data && data[0]) rowId[kind] = data[0].id;
+        let made = null, error = null;
+        try { made = await itemsApi("insert", { kind, data: { list: seed } }); } catch (e) { error = e; }
+        if (made && made.id) rowId[kind] = made.id;
         else {
           const again = await selectRow(kind);
           if (again) { rowId[kind] = again.id; setKind(kind, await fromCloudList((again.data && Array.isArray(again.data.list)) ? again.data.list : [])); }
@@ -1247,7 +1258,6 @@
     saveEntriesLocal(); saveFavoredLocal();
     booted = true;
     renderAll();
-    subscribeRealtime();
     openEntryFromHash();
     // one-time: shrink any legacy rows that still hold base64 images
     for (const kind of ["selection", "favored"]) if (needMigrate[kind]) scheduleCloudPush(kind);
@@ -1305,8 +1315,8 @@
         try { renderAll(); } catch (_) {}
       }
     }
-    const { error } = await sb.from("shukatsu_items").update({ data: { list: payload }, updated_at: new Date().toISOString() }).eq("id", rowId[kind]);
-    if (error) { console.warn("cloud push", kind, error); try { showToast("同期エラー: " + (error.message || error.code || "unknown")); } catch (_) {} return; }
+    try { await itemsApi("update", { id: rowId[kind], data: { list: payload } }); }
+    catch (error) { console.warn("cloud push", kind, error); try { showToast("同期エラー: " + (error.message === "bad key" ? "合言葉がちがいます" : error.message)); } catch (_) {} return; }
     dirty[kind] = false;
   }
   function scheduleCloudPush(kind) {
@@ -3886,31 +3896,34 @@
     const gate = document.getElementById("authGate");
     const overlay = document.getElementById("syncOverlay");
     const errEl = document.getElementById("authError");
-    const btn = document.getElementById("googleLoginBtn");
+    const form = document.getElementById("keyForm");
+    const input = document.getElementById("gateKeyInput");
     const msg = document.getElementById("authMsg");
 
     if (!sb) {
       msg.textContent = "オフラインのようです。インターネットに接続してから開き直してください。";
-      if (btn) btn.style.display = "none";
+      form.style.display = "none";
       return;
     }
     function showGate(text) { if (text) msg.textContent = text; gate.style.display = "flex"; }
     function hideGate() { gate.style.display = "none"; }
 
-    btn.addEventListener("click", async () => {
-      errEl.style.display = "none";
-      btn.disabled = true;
-      const { error } = await sb.auth.signInWithOAuth({
-        provider: "google",
-        options: { redirectTo: window.location.origin + window.location.pathname }
-      });
-      if (error) {
-        errEl.textContent = "ログインに失敗しました: " + error.message;
-        errEl.style.display = "block";
-        btn.disabled = false;
-      }
+    const askKey = (wrong) => {
+      overlay.style.display = "none";
+      errEl.style.display = wrong ? "block" : "none";
+      errEl.textContent = wrong ? "合言葉がちがうようです。もう一度入れてください。" : "";
+      showGate("家計簿・じぶんノートと同じ合言葉を、この端末で1回だけ入れてください。");
+    };
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      let v = input.value.trim();
+      const m = v.match(/[#&]k=([^&\s]+)/);
+      if (m) { try { v = decodeURIComponent(m[1]); } catch (e) { v = m[1]; } }
+      if (!v) return;
+      try { localStorage.setItem("shukatsu:key", v); } catch (e) {}
+      input.value = "";
+      onSession({ user: { id: LOCAL_USER_ID, email: "" } }).then(() => { if (booted && typeof plusLoad === "function") plusLoad(); });
     });
-
     let booting = false;
     async function onSession(session) {
       if (session && session.user) {
@@ -3926,6 +3939,7 @@
             overlay.style.display = "none";
           } catch (e) {
             console.warn("boot error", e);
+            if (e.message === "bad key") { booting = false; askKey(true); return; }
             // Do NOT reveal the app (booted stays false) so we never overwrite cloud with empty.
             overlay.innerHTML = '<div style="text-align:center;font-family:system-ui,sans-serif;color:#dc2626;font-size:14px;line-height:1.8;padding:24px;">同期に失敗しました。<br>通信環境を確認して再読み込みしてください。<br><button onclick="location.reload()" style="margin-top:14px;padding:9px 20px;border:1px solid #dc2626;border-radius:8px;background:#fff;color:#dc2626;font-weight:700;cursor:pointer;">再読み込み</button></div>';
           } finally {
@@ -3937,13 +3951,18 @@
         showGate();
       }
     }
-    // 認証なし運用: ログイン画面を出さずに固定ユーザーとして即起動する。
-    if (btn) btn.style.display = "none";
+    // メールのログインはせず、合言葉で同期する
     const acct = document.getElementById("acctLabel");
     if (acct) acct.style.display = "none";
     const lg = document.getElementById("logoutBtn");
     if (lg) lg.style.display = "none";
-    setTimeout(() => onSession({ user: { id: LOCAL_USER_ID, email: "" } }), 0);
+    setTimeout(() => {
+      // 合言葉入りのリンク(#k=…)で開いたときは覚える
+      const m = location.hash.match(/k=([^&]+)/);
+      if (m) { try { localStorage.setItem("shukatsu:key", decodeURIComponent(m[1])); } catch (e) {} }
+      if (itemsKey()) onSession({ user: { id: LOCAL_USER_ID, email: "" } });
+      else askKey(false);
+    }, 0);
 
     // Pull latest whenever the app regains focus / comes online / periodically
     document.addEventListener("visibilitychange", () => { if (!document.hidden) cloudRefresh(); });
