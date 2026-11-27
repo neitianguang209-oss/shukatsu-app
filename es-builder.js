@@ -781,9 +781,9 @@ ${outputFormatText()}
     .eb-card h3 { font-size: 14px; margin: 0 0 8px; padding-bottom: 8px; border-bottom: 1px solid #eef0f3; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .eb-card label { display: block; font-size: 12px; font-weight: 600; color: #444c57; margin: 10px 0 4px; }
     .eb-card input[type=text], .eb-card input[type=number], .eb-card select, .eb-card textarea { width: 100%; }
-    .eb-badge { background: #eef2ff; color: #4356c7; font-size: 11px; border-radius: 6px; padding: 2px 7px; font-weight: 700; }
-    .eb-hint { font-size: 11.5px; color: var(--muted); font-weight: 400; line-height: 1.6; }
-    .eb-saved { font-size: 11px; color: var(--success); font-weight: 600; }
+    .eb-badge { background: #eef2ff; color: #4356c7; font-size: 12px; border-radius: 6px; padding: 2px 7px; font-weight: 700; }
+    .eb-hint { font-size: 12px; color: var(--muted); font-weight: 400; line-height: 1.6; }
+    .eb-saved { font-size: 12px; color: var(--success); font-weight: 600; }
     .eb-row { display: flex; gap: 10px; flex-wrap: wrap; }
     .eb-row > div { flex: 1; min-width: 160px; }
     .eb-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
@@ -796,18 +796,18 @@ ${outputFormatText()}
     .eb-qrow { border: 1px dashed #c9cfd8; border-radius: 10px; padding: 10px; margin-bottom: 8px; background: #fbfcfe; }
     .eb-qhead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
     .eb-qnum { font-size: 12px; font-weight: 700; color: #4356c7; }
-    .eb-qtype { font-size: 11px; background: #eef2ff; color: #4356c7; border-radius: 6px; padding: 1px 8px; }
+    .eb-qtype { font-size: 12px; background: #eef2ff; color: #4356c7; border-radius: 6px; padding: 1px 8px; }
     .eb-qtype.exp { background: #eafaf0; color: #1f7a46; }
     .eb-qdel { margin-left: auto; background: none; border: none; color: #9aa2ad; font-size: 15px; padding: 2px 6px; cursor: pointer; }
     .eb-qrow label { margin-top: 0; }
     .eb-ep { border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; margin-bottom: 6px; background: #fff; font-size: 13px; }
     .eb-ep summary { cursor: pointer; }
     .eb-ep-body { font-size: 12px; color: #374151; line-height: 1.7; margin-top: 6px; white-space: pre-wrap; }
-    .eb-tag { font-size: 11px; background: #f3f4f6; border-radius: 6px; padding: 1px 6px; color: var(--muted); }
+    .eb-tag { font-size: 12px; background: #f3f4f6; border-radius: 6px; padding: 1px 6px; color: var(--muted); }
     .eb-bm { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
     .eb-bm summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--primary); }
     .eb-bm-link { display: inline-block; margin-top: 6px; padding: 8px 14px; border-radius: 999px; background: var(--primary); color: #fff; font-weight: 700; font-size: 13px; text-decoration: none; cursor: grab; }
-    .eb-url { font-size: 11.5px; color: var(--muted); word-break: break-all; margin-top: 4px; }
+    .eb-url { font-size: 12px; color: var(--muted); word-break: break-all; margin-top: 4px; }
     `;
   }
 

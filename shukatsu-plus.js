@@ -6,12 +6,12 @@
 const PLUS_KEY_STORE = "shukatsu:key";
 const PLUS_CACHE = "shukatsu:plusCache";
 const PLUS_ES_STATUSES = ["下書き", "書いてもらい中", "入力済み(未提出)", "提出済", "完成版", "素材(設問ごと未分割)"];
-const PLUS_LOG_KINDS = ["締切", "予定", "連絡", "提出控え", "メモ"];
-const PLUS_LOG_ICON = { "締切": "⏰", "予定": "📅", "連絡": "✉️", "提出控え": "📨", "メモ": "🗒" };
+const PLUS_LOG_KINDS = ["締切", "予定", "面接メモ", "連絡", "提出控え", "メモ"];
+const PLUS_LOG_ICON = { "締切": "⏰", "予定": "📅", "連絡": "✉️", "提出控え": "📨", "メモ": "🗒", "面接メモ": "🎤" };
 
 let plus = { es: [], log: [], queue: [], episodes: [], notes: [], block: [] };
 let plusReady = false, plusLoading = false, plusError = "";
-let plusEsFilter = "", plusEsView = "es";   // builder | es | material
+let plusEsFilter = "", plusEsView = "es";   // builder | es | company | material
 let plusPw = {};          // カードID → パスワード。画面の中だけに持ち、端末には保存しない
 let plusPwReady = false;
 let plusOpenRow = "";     // 締切の一覧で開いている行
@@ -74,11 +74,12 @@ async function plusLoad(quiet) {
 
 function plusRerender() {
   try { renderAll(); } catch {}
+  try { plusRenderNoteLists(); } catch {}
   if (document.getElementById("modal").classList.contains("open") && editingId) plusRenderModalSection(editingId);
 }
 
 // ---------- 会社との対応 ----------
-function plusNorm(name) { return normalizeCompanyName(name || "").replace(/\s/g, ""); }
+function plusNorm(name) { return normalizeCompanyName(String(name || "").replace(/[【】]/g, "")).replace(/\s/g, ""); }
 function plusMatch(item, e) {
   if (item.entry_id) return item.entry_id === e.id;
   const a = plusNorm(item.company), b = plusNorm(e.company);
@@ -139,6 +140,44 @@ function plusCountHtml(text, limit) {
   const cls = n > limit ? "over" : (n >= limit * 0.9 ? "ok" : "short");
   return `<span class="plus-count ${cls}">${n}/${limit}字</span>`;
 }
+
+// ---------- ESに対応する応募カード・締切・結果 ----------
+function plusEsEntry(a) {
+  if (a.entry_id) { const e = entries.find(x => x.id === a.entry_id); if (e) return e; }
+  const n = plusNorm(a.company);
+  let list = entries.filter(e => plusNorm(e.company) === n);
+  if (list.length > 1 && a.program) list = list.filter(e => e.program === a.program);
+  return list.length === 1 ? list[0] : null;      // 併願で決められないときは出さない
+}
+const PLUS_ES_DUE_TITLE = /ES|エントリーシート|エントリー|応募|書類|志望|シート/i;
+// ES側に締切が無ければ、記録の締切(なければカードのES締切)を出す。入力はいらない
+function plusEsDeadline(a) {
+  if (a.deadline) return { iso: a.deadline, from: "" };
+  if (a.status === "完成版" || plusIsMaterial(a)) return null;
+  const e = plusEsEntry(a);
+  if (!e) return null;
+  const list = plus.log.filter(l => l.kind === "締切" && l.due_at && PLUS_ES_DUE_TITLE.test(l.title || "")
+      && (l.entry_id ? l.entry_id === e.id : plusNorm(l.company) === plusNorm(e.company)))
+    .map(l => ({ iso: l.due_at, from: "記録", open: !l.done }));
+  if (/^\d{4}-\d{2}-\d{2}$/.test(e.deadline || "")) list.push({ iso: plusToIso(e.deadline, e.deadlineTime), from: "カード", open: !dueDone(e, "es", e.deadline) });
+  if (!list.length) return null;
+  list.sort((x, y) => new Date(x.iso) - new Date(y.iso));
+  return list.find(x => x.open && new Date(x.iso).getTime() >= Date.now() - 86400000) || list[list.length - 1];
+}
+// 結果が入っていなければ、選考カードのフェーズから通過・落選を出す
+function plusEsResult(a) {
+  if (a.result && a.result !== "不明") return { text: a.result === "通過" ? "✓ 通過" : "× " + a.result, cls: a.result === "通過" ? "ok" : "ng" };
+  if (!["提出済", "入力済み(未提出)"].includes(a.status) && !plusIsMaterial(a)) return null;
+  const e = plusEsEntry(a);
+  if (!e) return null;
+  if (["IS落ち", "不合格"].includes(e.phase)) return { text: `× 落選(${e.phase})`, cls: "ng" };
+  if (e.phase === "辞退") return { text: "− 辞退", cls: "" };
+  const main = /本選考|早期選考/.test(`${a.program || ""} ${e.program || ""}`);
+  if (["一次", "二次", "最終", "内定"].includes(e.phase) || (e.phase === "インターン通過" && !main)) return { text: `✓ 通過(今は${phaseByKey[e.phase].label})`, cls: "ok" };
+  return a.status === "提出済" ? { text: "… 結果待ち", cls: "wait" } : null;
+}
+function plusIsMaterial(a) { return String(a.status || "").startsWith("素材"); }
+function plusNoQuestion(a) { return !String(a.question || "").trim() && !a.no_question_ok; }
 
 // ---------- カードに出す1行 ----------
 function plusCardHtml(e) {
@@ -295,7 +334,9 @@ function plusCheckPanelHtml() {
   return `<div class="plus-panel plus-alert">
     <div class="plus-panel-head">⚠ 要チェック<span>${overdue.length + noNext.length}件</span></div>
     ${overdue.length ? `<div class="plus-muted">締切が過ぎたのに「済み」になっていません。出していたら ✓ を押してください。</div>
-      ${overdue.map(x => plusDueRowHtml(x)).join("")}` : ""}
+      ${overdue.map(x => plusDueRowHtml(x)).join("")}
+      <button class="secondary icon" data-plus-expire-all style="margin-top:6px;">残り${overdue.length}件をまとめて「期限切れ」にする</button>
+      <div class="plus-muted">記録の締切は、3日たつと自動で「期限切れ」になります。</div>` : ""}
     ${noNext.length ? `<div class="plus-muted" style="margin-top:6px;">選考中なのに、次の締切・予定が入っていません。メールやマイページを確かめてください。</div>
       ${noNext.map(e => `<div class="plus-up-row">
         <div class="plus-up-main" data-plus-peek="next:${e.id}"><div class="plus-up-title"><b>${escapeHtml(e.company)}</b>${e.program ? ` <span class="plus-muted">${escapeHtml(e.program)}</span>` : ""}</div>
@@ -411,6 +452,7 @@ function plusRenderModalSection(entryId) {
   const f = plusFor(e);
   const logs = f.log.slice().sort((a, b) => new Date(b.due_at || b.created_at) - new Date(a.due_at || a.created_at));
   box.innerHTML = `
+    <button type="button" class="secondary plus-note-open" data-plus-note="${escapeHtml(e.company)}">🏢 企業ノートを開く(面接メモ・企業研究)</button>
     <div class="plus-sec-head">記録<span class="plus-muted">Claudeに貼ったメール・提出した内容など</span></div>
     ${logs.length ? logs.map(plusLogItemHtml).join("") : `<div class="plus-muted">まだありません。メールのスクショをClaudeに貼ると、ここに締切や内容が残ります。</div>`}
     <details class="plus-add-log">
@@ -434,9 +476,13 @@ function plusRenderModalSection(entryId) {
       <button type="button" class="secondary icon" data-plus-es-new="${e.id}">＋ ESの設問を追加</button>
       <button type="button" class="secondary icon" data-plus-ask="${e.id}">🤖 ESビルダーで書く${f.es.some(x => !x.answer) ? "(空の設問を入れて開く)" : ""}</button>
     </div>
-    ${f.queue.length ? `<div class="plus-wait-line">⏳ ${f.queue.map(q => `${escapeHtml(q.kind)}:${escapeHtml(q.status)}${q.note ? `(${escapeHtml(q.note)})` : ""}`).join(" / ")}</div>` : ""}
+    ${f.queue.map(plusQueueRowHtml).join("")}
     ${plusBlockFormHtml(e)}
   `;
+}
+function plusQueueRowHtml(q) {
+  return `<div class="plus-wait-line plus-queue-row"><span>⏳ <b>${escapeHtml(q.company)}</b> ${escapeHtml(q.program || "")} ${escapeHtml(q.kind)}:${escapeHtml(q.status)}${/^\d{4}-/.test(q.deadline || "") ? `・締切 ${escapeHtml(plusDueText(q.deadline))}` : ""}${q.note ? `<br>${escapeHtml(q.note)}` : ""}</span>
+    ${q.kind === "ES" ? `<button type="button" class="secondary icon" data-plus-skip="${q.id}">出さない</button>` : ""}</div>`;
 }
 function plusLogItemHtml(l) {
   const chip = !l.done && l.due_at && (l.kind === "締切" || l.kind === "予定") ? plusChip(l.due_at) : null;
@@ -447,7 +493,8 @@ function plusLogItemHtml(l) {
       ${l.due_at ? `<b>${escapeHtml(plusDueText(l.due_at))}</b>` : ""}
       ${chip ? `<span class="days-left ${chip.cls}">${escapeHtml(chip.text)}</span>` : ""}
       <span class="plus-log-acts">
-        ${l.kind === "締切" || l.kind === "予定" ? `<label class="plus-done"><input type="checkbox" data-plus-toggle="${l.id}" ${l.done ? "checked" : ""}>済み</label>` : ""}
+        ${l.done && ["期限切れ", "見送り"].includes(l.closed_as) ? `<span class="plus-closed">${l.closed_as}</span><button type="button" class="plus-more" data-plus-reopen="${l.id}">戻す</button>`
+          : l.kind === "締切" || l.kind === "予定" ? `<label class="plus-done"><input type="checkbox" data-plus-toggle="${l.id}" ${l.done ? "checked" : ""}>済み</label>` : ""}
         <button type="button" class="plus-x" data-plus-dellog="${l.id}" title="消す">×</button>
       </span>
     </div>
@@ -459,12 +506,26 @@ function plusLogItemHtml(l) {
 function plusEsMiniHtml(a) {
   return `<div class="plus-es-mini" data-plus-es="${a.id}">
     <div class="plus-es-q">${escapeHtml(a.question || "(設問なし)")}</div>
-    <div class="plus-es-meta"><span class="plus-st st-${escapeHtml(a.status || "")}">${escapeHtml(a.status || "")}</span> ${a.answer ? plusCountHtml(a.answer, a.char_limit) : ""}
-      ${a.deadline ? `締切 ${escapeHtml(plusDueText(a.deadline))}` : ""}</div>
+    <div class="plus-es-meta">${plusStatusHtml(a)} ${plusResultHtml(a)} ${a.answer ? plusCountHtml(a.answer, a.char_limit) : ""}
+      ${plusDeadlineHtml(a)}</div>
   </div>`;
 }
 
 // ---------- ESタブ ----------
+function plusStatusHtml(a) {
+  return plusIsMaterial(a) ? `<span class="plus-st st-material">📎 素材</span>`
+    : `<span class="plus-st st-${escapeHtml(a.status || "")}">${escapeHtml(a.status || "")}</span>`;
+}
+function plusResultHtml(a) {
+  const r = plusEsResult(a);
+  return r ? `<span class="plus-st plus-res ${r.cls}">${escapeHtml(r.text)}</span>` : "";
+}
+function plusDeadlineHtml(a) {
+  const d = plusEsDeadline(a);
+  if (!d) return "";
+  const chip = a.status !== "提出済" && d.open !== false && !plusIsMaterial(a) ? plusChip(d.iso) : null;
+  return `<span>締切 ${escapeHtml(plusDueText(d.iso))}${d.from ? `<span class="plus-from">(${d.from}より)</span>` : ""}</span>${chip ? ` <span class="days-left ${chip.cls}">${escapeHtml(chip.text)}</span>` : ""}`;
+}
 function plusRenderEsTab() {
   const v = document.getElementById("esView");
   if (!v) return;
@@ -472,18 +533,24 @@ function plusRenderEsTab() {
     v.innerHTML = plusError === "nokey" ? plusKeyBannerHtml() : `<div class="plus-muted" style="padding:20px;text-align:center;">読み込み中…</div>`;
     return;
   }
+  const done = plus.es.filter(a => !plusIsMaterial(a));
   const head = `
     <div class="plus-seg">
-      <button class="${plusEsView === "builder" ? "on" : ""}" data-plus-view="builder">🪄 ビルダー</button>
-      <button class="${plusEsView === "es" ? "on" : ""}" data-plus-view="es">ES ${plus.es.length}</button>
-      <button class="${plusEsView === "material" ? "on" : ""}" data-plus-view="material">材料 ${plus.episodes.length}</button>
+      <button class="${plusEsView === "builder" ? "on" : ""}" data-plus-view="builder">🪄 作る</button>
+      <button class="${plusEsView === "es" ? "on" : ""}" data-plus-view="es">ES ${done.length}</button>
+      <button class="${plusEsView === "company" ? "on" : ""}" data-plus-view="company">🏢 企業 ${plusCompanies().length}</button>
+      <button class="${plusEsView === "material" ? "on" : ""}" data-plus-view="material">体験 ${plus.episodes.length}</button>
     </div>`;
   plusShowBuilderView();
   if (plusEsView === "builder") { v.innerHTML = head; if (typeof esBuilder !== "undefined") esBuilder.sync(); return; }
   if (plusEsView === "material") { v.innerHTML = head + plusMaterialHtml(); return; }
+  if (plusEsView === "company") { v.innerHTML = head + plusCompanyListHtml(); return; }
+  const open = cls => !!v.querySelector(`details.${cls}[open]`);   // 1分ごとの読み直しで閉じないように
+  const waitOpen = open("plus-waiting"), matOpen = open("plus-materials");
   const q = filters.search.trim();
   let items = plus.es.slice();
-  if (plusEsFilter) items = items.filter(a => a.status === plusEsFilter);
+  if (plusEsFilter === "__noq") items = items.filter(plusNoQuestion);
+  else if (plusEsFilter) items = items.filter(a => a.status === plusEsFilter);
   if (q) {
     const readingOf = a => entries.filter(e => plusMatch(a, e)).map(e => e.reading || "").join(" ");
     const n = companySearch.norm(q);
@@ -493,18 +560,24 @@ function plusRenderEsTab() {
     items = hit;
   }
   const counts = Object.fromEntries(PLUS_ES_STATUSES.map(s => [s, plus.es.filter(a => a.status === s).length]));
+  const noq = plus.es.filter(plusNoQuestion).length;
   const waiting = plus.queue.filter(x => x.kind === "ES" && x.status === "待ち");
+  const main = plusEsFilter ? items : items.filter(a => !plusIsMaterial(a));
+  const mats = plusEsFilter ? [] : items.filter(plusIsMaterial);
+  const empty = `<div class="plus-muted" style="padding:20px;text-align:center;">ありません</div>`;
   v.innerHTML = head + `
     <div class="plus-chips">
       <button class="${plusEsFilter ? "" : "on"}" data-plus-filter="">すべて</button>
       ${PLUS_ES_STATUSES.filter(s => counts[s]).map(s => `<button class="${plusEsFilter === s ? "on" : ""}" data-plus-filter="${s}">${s.replace("(設問ごと未分割)", "")} ${counts[s]}</button>`).join("")}
+      ${noq ? `<button class="warn ${plusEsFilter === "__noq" ? "on" : ""}" data-plus-filter="__noq">⚠ 設問なし ${noq}</button>` : ""}
     </div>
-    ${waiting.length ? `<div class="plus-wait-line">⏳ Claudeが書く待ち: ${waiting.map(x => escapeHtml(x.company)).join("、")}<br><span class="plus-muted">スマホのClaudeに「就活アプリのES書いて」と送るか、パソコンで「就活の待ち処理して」</span></div>` : ""}
-    <div class="card-list">${items.map(plusEsCardHtml).join("") || `<div class="plus-muted" style="padding:20px;text-align:center;">ありません</div>`}</div>`;
+    ${plusEsFilter === "__noq" ? `<div class="plus-muted" style="margin-bottom:8px;">分かる分だけ設問を入れてください。もう分からないものは「このままでよい」を押すと一覧から消えます。</div>` : ""}
+    ${waiting.length ? `<details class="plus-waiting" ${waitOpen ? "open" : ""}><summary>⏳ Claudeが書く待ち ${waiting.length}件</summary>${waiting.map(plusQueueRowHtml).join("")}<div class="plus-muted">スマホのClaudeに「就活アプリのES書いて」と送るか、パソコンで「就活の待ち処理して」</div></details>` : ""}
+    <div class="card-list">${main.map(plusEsCardHtml).join("") || (mats.length ? "" : empty)}</div>
+    ${mats.length ? `<details class="plus-materials" ${q || matOpen ? "open" : ""}><summary>📎 素材(設問ごとに分けていないメモ) ${mats.length}件</summary><div class="card-list">${mats.map(plusEsCardHtml).join("")}</div></details>` : ""}`;
 }
 function plusEsCardHtml(a) {
-  const chip = a.deadline && a.status !== "提出済" ? plusChip(a.deadline) : null;
-  return `<div class="card plus-es-card">
+  return `<div class="card plus-es-card${plusIsMaterial(a) ? " is-material" : ""}">
     <div class="card-body">
       <div class="card-top">
         <div style="min-width:0;flex:1">
@@ -516,18 +589,173 @@ function plusEsCardHtml(a) {
         </div>
       </div>
       <div class="plus-es-meta">
-        <span class="plus-st st-${escapeHtml(a.status || "")}">${escapeHtml(a.status || "")}</span>
-        ${a.result && a.result !== "不明" ? `<span class="plus-st">${escapeHtml(a.result)}</span>` : ""}
+        ${plusStatusHtml(a)}
+        ${plusResultHtml(a)}
         ${a.answer ? plusCountHtml(a.answer, a.char_limit) : ""}
         ${a.source === "Muse" ? `<span class="plus-st">Muse</span>` : ""}
-        ${a.deadline ? `<span>締切 ${escapeHtml(plusDueText(a.deadline))}</span>` : ""}
-        ${chip ? `<span class="days-left ${chip.cls}">${escapeHtml(chip.text)}</span>` : ""}
+        ${plusDeadlineHtml(a)}
       </div>
       ${a.question ? `<div class="plus-es-q">${escapeHtml(a.question)}</div>` : ""}
+      ${plusNoQuestion(a) ? `<div class="plus-noq"><span>⚠ 設問がありません</span><button class="secondary icon" data-plus-es="${a.id}">設問を入れる</button><button class="secondary icon" data-plus-noq="${a.id}">このままでよい</button></div>` : ""}
       ${a.answer ? `<div class="card-memo collapsed plus-es-answer" data-plus-expand>${escapeHtml(a.answer)}</div>` : ""}
     </div>
   </div>`;
 }
+
+// ---------- 企業ノート(会社ごとのページ。面接メモをためる) ----------
+const PLUS_NOTE_FIELDS = [["business", "事業内容"], ["strategy", "戦略・これから"], ["strengths", "強み"], ["wanted_person", "求める人物像"], ["fit_with_me", "自分との相性"], ["memo", "自由メモ"], ["industry", "業界"], ["mypage_url", "マイページURL"], ["mypage_login_id", "マイページID"]];
+function plusCompanies() {
+  const map = new Map();
+  (plus.notes || []).forEach(n => { const k = plusNorm(n.company); if (k && !map.has(k)) map.set(k, { name: n.company, note: n }); });
+  plus.log.filter(l => l.kind === "面接メモ").forEach(l => { const k = plusNorm(l.company); if (k && !map.has(k)) map.set(k, { name: l.company, note: null }); });
+  return [...map.values()];
+}
+function plusCompanyData(name) {
+  const k = plusNorm(name);
+  const cards = entries.filter(e => plusNorm(e.company) === k);
+  const ids = new Set(cards.map(e => e.id));
+  const same = x => (x.entry_id && ids.has(x.entry_id)) || plusNorm(x.company) === k;
+  const at = l => new Date(l.due_at || l.created_at);
+  return { cards, note: (plus.notes || []).find(n => plusNorm(n.company) === k) || null,
+    log: plus.log.filter(same).sort((a, b) => at(b) - at(a)), es: plus.es.filter(same) };
+}
+function plusCompanyListHtml() {
+  const q = filters.search.trim();
+  let list = plusCompanies().map(c => ({ ...c, d: plusCompanyData(c.name) }));
+  if (q) list = list.filter(c => companySearch.match(c.name, q, c.d.cards.map(e => e.reading || "").join(" ")));
+  const memos = c => c.d.log.filter(l => l.kind === "面接メモ").length;
+  list.sort((a, b) => memos(b) - memos(a) || a.name.localeCompare(b.name, "ja"));
+  return `<div class="plus-muted" style="margin:8px 0;">会社ごとの企業研究と面接メモ。ESがある会社の枠は自動でできます。ほかの会社は、選考カードの編集画面から開けます。</div>
+    <div class="card-list">${list.map(c => {
+      const filled = PLUS_NOTE_FIELDS.slice(0, 6).filter(([k]) => c.note && c.note[k]).length;
+      return `<button type="button" class="card plus-company" data-plus-note="${escapeHtml(c.name)}">
+        <span><b>${escapeHtml(c.name)}</b>
+        <span class="plus-es-meta"><span class="plus-st ${memos(c) ? "st-下書き" : ""}">🎤 面接メモ ${memos(c)}</span><span class="plus-st">企業研究 ${filled ? filled + "項目" : "まだ"}</span><span class="plus-st">ES ${c.d.es.length}</span></span></span>
+      </button>`;
+    }).join("") || `<div class="plus-muted" style="padding:20px;text-align:center;">ありません</div>`}</div>`;
+}
+let plusNoteName = "", plusNoteLogId = "";
+function plusEnsureNoteModal() {
+  if (document.getElementById("plusNoteModal")) return;
+  plusEnsureEsModal();                       // ESの編集画面は企業ノートより手前に重ねる
+  const div = document.createElement("div");
+  div.className = "modal-backdrop";
+  div.id = "plusNoteModal";
+  div.innerHTML = `
+    <div class="modal">
+      <h2 id="pn_title"></h2>
+      <div class="plus-sec-head">面接メモを書く</div>
+      <div class="plus-log-form">
+        <div style="display:flex;gap:6px;">
+          <input type="date" id="pn_date" style="flex:1;min-width:0;">
+          <input type="text" id="pn_head" placeholder="例: 一次面接" style="flex:1.4;min-width:0;">
+        </div>
+        <textarea id="pn_body" placeholder="聞かれたこと・答えたこと・感じたこと・次に直すこと" style="margin-top:6px;min-height:110px;"></textarea>
+        <button type="button" id="pn_add" style="margin-top:6px;">メモを残す</button>
+      </div>
+      <div id="pn_timeline"></div>
+      <details class="plus-note-fields" id="pn_research">
+        <summary>🔎 企業研究・マイページ</summary>
+        ${PLUS_NOTE_FIELDS.map(([k, l]) => `<div class="field"><label>${l}</label>${["industry", "mypage_url", "mypage_login_id"].includes(k) ? `<input type="text" id="pn_f_${k}">` : `<textarea id="pn_f_${k}" style="min-height:56px;"></textarea>`}</div>`).join("")}
+        <button type="button" id="pn_save">企業研究を保存</button>
+      </details>
+      <div id="pn_es"></div>
+      <div class="modal-actions"><div></div><div class="right"><button type="button" class="secondary" id="pn_close">閉じる</button></div></div>
+    </div>`;
+  document.body.insertBefore(div, document.getElementById("plusEsModal"));
+  const close = () => {
+    const dirty = document.getElementById("pn_body").value !== document.getElementById("pn_body").dataset.start
+      || PLUS_NOTE_FIELDS.some(([k]) => { const el = document.getElementById(`pn_f_${k}`); return el.value !== el.dataset.start; });
+    if (dirty && !confirm("保存していない書きかけがあります。閉じますか?")) return;
+    div.classList.remove("open"); plusNoteName = "";
+  };
+  div.addEventListener("click", ev => { if (ev.target === div) close(); });
+  document.getElementById("pn_close").addEventListener("click", close);
+  document.getElementById("pn_add").addEventListener("click", plusNoteAddMemo);
+  document.getElementById("pn_save").addEventListener("click", plusNoteSave);
+}
+function plusOpenNote(name) {
+  plusEnsureNoteModal();
+  plusNoteName = name; plusNoteResetForm();
+  const d = plusCompanyData(name);
+  const card = d.cards.find(e => e.mypageUrl || e.mypageId) || d.cards[0] || {};
+  const base = { industry: card.industry, mypage_url: card.mypageUrl, mypage_login_id: card.mypageId };
+  document.getElementById("pn_title").textContent = `🏢 ${name}`;
+  PLUS_NOTE_FIELDS.forEach(([k]) => {
+    const el = document.getElementById(`pn_f_${k}`);
+    el.value = (d.note && d.note[k]) || base[k] || ""; el.dataset.start = el.value;
+  });
+  document.getElementById("pn_research").open = false;
+  plusRenderNoteLists();
+  const m = document.getElementById("plusNoteModal");
+  m.classList.add("open"); m.querySelector(".modal").scrollTop = 0;
+}
+function plusNoteResetForm() {
+  plusNoteLogId = "";
+  document.getElementById("pn_date").value = plusJst(new Date().toISOString()).date;
+  document.getElementById("pn_head").value = "";
+  document.getElementById("pn_body").value = "";
+  document.getElementById("pn_body").dataset.start = "";
+  document.getElementById("pn_add").textContent = "メモを残す";
+}
+function plusNoteEditMemo(id) {
+  const l = plus.log.find(x => x.id === id);
+  if (!l) return;
+  plusNoteLogId = l.id;
+  document.getElementById("pn_date").value = (plusJst(l.due_at || l.created_at) || {}).date || "";
+  document.getElementById("pn_head").value = l.title;
+  const body = document.getElementById("pn_body");
+  body.value = l.body || ""; body.dataset.start = body.value;
+  document.getElementById("pn_add").textContent = "直した内容を保存";
+  body.focus();
+}
+// 一覧の部分だけを描き直す(書きかけの欄は消さない)
+function plusRenderNoteLists() {
+  const box = document.getElementById("pn_timeline");
+  if (!plusNoteName || !box) return;
+  const opened = new Set([...document.querySelectorAll("#plusNoteModal details[data-k][open]")].map(x => x.dataset.k));
+  const d = plusCompanyData(plusNoteName);
+  const memos = d.log.filter(l => l.kind === "面接メモ"), others = d.log.filter(l => l.kind !== "面接メモ");
+  box.innerHTML = `
+    <div class="plus-sec-head" style="margin-top:12px;">面接メモ<span class="plus-muted">${memos.length}件</span></div>
+    ${memos.map(l => `<div class="plus-log plus-memo">
+      <div class="plus-log-top"><b>${escapeHtml(plusDueText(l.due_at || l.created_at).replace(/ \d\d:\d\d$/, ""))}</b> <span class="plus-log-title">${escapeHtml(l.title)}</span>
+        <span class="plus-log-acts"><button type="button" class="plus-more" data-plus-memo-edit="${l.id}">直す</button><button type="button" class="plus-x" data-plus-dellog="${l.id}" title="消す">×</button></span></div>
+      ${l.body ? `<div class="plus-log-body">${escapeHtml(l.body)}</div>` : ""}</div>`).join("") || `<div class="plus-muted">まだありません。面接のあとに上の欄へ。</div>`}
+    ${others.length ? `<details class="plus-note-fields" data-k="log" ${opened.has("log") ? "open" : ""}><summary>🗒 締切・連絡などの記録 ${others.length}件</summary>${others.map(plusLogItemHtml).join("")}</details>` : ""}`;
+  document.getElementById("pn_es").innerHTML = d.es.length ? `<details class="plus-note-fields" data-k="es" ${opened.has("es") ? "open" : ""}><summary>✍️ この会社のES ${d.es.length}件</summary>${d.es.map(plusEsMiniHtml).join("")}</details>` : "";
+}
+async function plusNoteAddMemo() {
+  const body = document.getElementById("pn_body").value.trim();
+  const title = document.getElementById("pn_head").value.trim() || "面接メモ";
+  if (!body) { showToast("メモを書いてください"); return; }
+  const d = plusCompanyData(plusNoteName);
+  const due_at = plusToIso(document.getElementById("pn_date").value, "");
+  const btn = document.getElementById("pn_add"); btn.disabled = true;
+  try {
+    if (plusNoteLogId) {
+      const r = await plusApi("update_log", { id: plusNoteLogId, title, body, due_at });
+      plus.log = plus.log.map(x => x.id === r.id ? r : x);
+    } else {
+      const r = await plusApi("add_log", { entry_id: d.cards.length === 1 ? d.cards[0].id : "", company: plusNoteName, kind: "面接メモ", title, body, due_at });
+      plus.log.unshift(r);
+    }
+    plusNoteResetForm(); plusRerender(); showToast("メモを残しました");
+  } catch (e) { showToast("保存できませんでした: " + e.message); }
+  finally { btn.disabled = false; }
+}
+async function plusNoteSave() {
+  const d = plusCompanyData(plusNoteName);
+  const args = { company: d.note ? d.note.company : plusNoteName };
+  PLUS_NOTE_FIELDS.forEach(([k]) => { const el = document.getElementById(`pn_f_${k}`); if (el.value !== el.dataset.start) args[k] = el.value.trim(); });
+  try {
+    const r = await plusApi("save_note", args);
+    plus.notes = (plus.notes || []).filter(n => n.company !== r.company).concat([r]);
+    PLUS_NOTE_FIELDS.forEach(([k]) => { const el = document.getElementById(`pn_f_${k}`); el.dataset.start = el.value; });
+    plusRerender(); showToast("保存しました");
+  } catch (e) { showToast("保存できませんでした: " + e.message); }
+}
+
 function plusMaterialHtml() {
   const rows = [["状況", "situation"], ["課題", "challenge"], ["行動", "actions"], ["結果", "result"], ["数字", "numbers"], ["学び", "learning"]];
   return `<div class="plus-muted" style="margin:8px 0;">ESを書くときにClaudeが使う材料です。直したいところはClaudeに「〇〇のエピソード、ここ違う」と言えば直ります。</div>
@@ -675,14 +903,14 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     .plus-up-title { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .plus-check { width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid var(--border); background: #fff; color: var(--muted); padding: 0; flex: none; font-size: 14px; }
     .plus-check:hover { border-color: var(--success); color: var(--success); background: #ecfdf5; }
-    .plus-caret { color: var(--muted); font-size: 11px; cursor: pointer; padding: 8px 2px; }
+    .plus-caret { color: var(--muted); font-size: 12px; cursor: pointer; padding: 8px 2px; }
     .plus-peek { background: #f5f6ff; border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 8px; }
     .plus-peek-row { display: flex; gap: 8px; align-items: center; }
     .plus-peek-row button { flex: none; font-size: 13px; padding: 9px 12px; min-width: 104px; }
     .plus-peek-row button.copied { background: var(--success); color: #fff; }
     .plus-peek-main { flex: 1; min-width: 0; font-size: 13px; font-weight: 700; color: var(--text); text-decoration: none; }
     a.plus-peek-main { color: var(--primary); }
-    .plus-peek-main small { display: block; font-weight: 500; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
+    .plus-peek-main small { font-size: 12px; display: block; font-weight: 500; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
     .plus-more { background: none; color: var(--primary); padding: 4px 0; font-size: 12px; }
     .plus-wait-line { margin-top: 6px; font-size: 12px; color: #92400e; background: #fffbeb; border-radius: 8px; padding: 6px 8px; line-height: 1.6; }
     .plus-muted { color: var(--muted); font-size: 12px; font-weight: 400; }
@@ -707,9 +935,10 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     .plus-kind.k-提出控え { background: #ecfdf5; color: #047857; }
     .plus-log-title { font-weight: 600; font-size: 13px; margin-top: 3px; }
     .plus-log-body { font-size: 12px; color: #374151; white-space: pre-wrap; margin-top: 3px; max-height: 160px; overflow: auto; }
-    .plus-log-meta { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    .plus-log-meta { font-size: 12px; color: var(--muted); margin-top: 3px; }
     .plus-add-log summary { cursor: pointer; color: var(--primary); font-size: 13px; font-weight: 600; padding: 4px 0; }
     .plus-log-form { padding: 6px 0; }
+    .plus-log-form textarea { display: block; width: 100%; box-sizing: border-box; }
     .plus-es-mini { border: 1px solid var(--border); border-radius: 10px; padding: 7px 10px; margin-bottom: 6px; cursor: pointer; background: #fff; }
     .plus-es-q { font-size: 13px; font-weight: 600; margin-top: 4px; white-space: pre-wrap; }
     .plus-es-meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--muted); margin-top: 4px; }
@@ -723,7 +952,7 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     .plus-count.short { color: var(--warning); }
     .plus-es-answer { cursor: pointer; margin-top: 6px; }
     .plus-seg { display: flex; gap: 4px; background: #eef0f5; border-radius: 10px; padding: 3px; }
-    .plus-seg button { flex: 1; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; padding: 7px; border-radius: 8px; }
+    .plus-seg button { flex: 1 1 auto; white-space: nowrap; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; padding: 7px; border-radius: 8px; }
     .plus-seg button.on { background: #fff; color: var(--text); box-shadow: var(--shadow); }
     .plus-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
     .plus-chips button { background: #fff; border: 1px solid var(--border); color: var(--muted); font-size: 12px; padding: 4px 10px; border-radius: 999px; }
@@ -733,8 +962,32 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     .plus-ep-body { padding: 0 14px 12px; font-size: 13px; line-height: 1.7; }
     .plus-ep-body b { display: inline-block; min-width: 3em; color: var(--muted); font-size: 12px; margin-right: 6px; }
     .plus-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-    .plus-tags span { font-size: 11px; background: #f3f4f6; border-radius: 6px; padding: 1px 6px; color: #374151; }
+    .plus-tags span { font-size: 12px; background: #f3f4f6; border-radius: 6px; padding: 1px 6px; color: #374151; }
     .plus-keybox input { font-size: 15px; }
+    .plus-st.st-material { background: #fff; color: #78350f; border: 1.5px dashed #b45309; }
+    .plus-st.plus-res.ok { background: #15803d; color: #fff; }
+    .plus-st.plus-res.ng { background: #44403c; color: #fff; }
+    .plus-st.plus-res.wait { background: #fff; border: 1px solid var(--border); color: var(--muted); }
+    .plus-from { font-size: 12px; margin-left: 2px; }
+    .plus-closed { font-weight: 700; color: #57534e; background: #e7e5e4; border-radius: 6px; padding: 1px 6px; }
+    .plus-chips button.warn { border-color: #f59e0b; color: #92400e; }
+    .plus-chips button.warn.on { background: #b45309; border-color: #b45309; color: #fff; }
+    .plus-noq { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 6px; font-size: 12px; color: #92400e; }
+    .plus-materials { margin-top: 14px; }
+    .plus-materials summary, .plus-waiting summary { cursor: pointer; font-size: 13px; font-weight: 700; padding: 8px 0; }
+    .plus-waiting { margin-bottom: 8px; }
+    .card.plus-es-card.is-material { border-left: 4px dashed #b45309; background: #fffdf7; }
+    .plus-queue-row { display: flex; gap: 8px; align-items: center; }
+    .plus-queue-row span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .plus-queue-row button { flex: none; }
+    button.card.plus-company { width: 100%; text-align: left; background: var(--card); color: var(--text); font-size: 15px; font-weight: 400; }
+    .plus-company > span { display: block; min-width: 0; }
+    .plus-company b { display: block; }
+    .plus-note-open { width: 100%; margin-bottom: 12px; }
+    .plus-note-fields { margin-top: 12px; }
+    .plus-note-fields summary { cursor: pointer; font-size: 13px; font-weight: 700; padding: 6px 0; }
+    .plus-memo .plus-log-title { margin-top: 0; }
+    .plus-memo .plus-log-body { max-height: none; font-size: 13px; line-height: 1.7; }
     .plus-block-box { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; font-size: 13px; background: #fff; }
     .plus-block-box summary { cursor: pointer; color: var(--muted); font-weight: 600; }
     .plus-block-box.on { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: #fef2f2; color: #991b1b; border-color: #fecaca; }
@@ -744,9 +997,44 @@ function plusOpenBuilder(company, entryId, program, esRows) {
   document.head.appendChild(style);
 
   document.addEventListener("click", async ev => {
-    const t = ev.target.closest("[data-card-done],[data-next-ok],[data-plus-open],[data-plus-done],[data-plus-more],[data-plus-es],[data-plus-es-new],[data-plus-ask],[data-plus-copy],[data-plus-filter],[data-plus-view],[data-plus-dellog],[data-plus-expand],[data-plus-keep],[data-plus-block-cand],[data-plus-unblock],[data-plus-block-entry],[data-plus-peek],[data-copy],[data-pwcopy],#plusKeySave,#plusLogAdd,#pwShowBtn,#pwCopyBtn");
+    const t = ev.target.closest("[data-card-done],[data-next-ok],[data-plus-open],[data-plus-done],[data-plus-more],[data-plus-es],[data-plus-es-new],[data-plus-ask],[data-plus-copy],[data-plus-filter],[data-plus-view],[data-plus-dellog],[data-plus-expand],[data-plus-keep],[data-plus-block-cand],[data-plus-unblock],[data-plus-block-entry],[data-plus-peek],[data-copy],[data-pwcopy],[data-plus-note],[data-plus-memo-edit],[data-plus-noq],[data-plus-skip],[data-plus-reopen],[data-plus-expire-all],#plusKeySave,#plusLogAdd,#pwShowBtn,#pwCopyBtn");
     if (!t) return;
     const ds = t.dataset;
+    if (ds.plusNote !== undefined) { ev.stopPropagation(); plusOpenNote(ds.plusNote); return; }
+    if (ds.plusMemoEdit) { plusNoteEditMemo(ds.plusMemoEdit); return; }
+    if (ds.plusNoq) {
+      try { await plusApi("es_noq", { id: ds.plusNoq }); const a = plus.es.find(x => x.id === ds.plusNoq); if (a) a.no_question_ok = true; if (!plus.es.some(plusNoQuestion) && plusEsFilter === "__noq") plusEsFilter = ""; plusRerender(); }
+      catch (e) { showToast("できませんでした: " + e.message); }
+      return;
+    }
+    if (ds.plusSkip) {
+      const q = plus.queue.find(x => String(x.id) === ds.plusSkip);
+      if (!q || !confirm(`${q.company} ${q.program || ""} は出さないことにしますか?\nES待ちと、この募集の締切を外します。`)) return;
+      try { await plusApi("skip", { entry_id: q.entry_id || "", company: q.company, program: q.program || "" }); showToast("外しました"); await plusLoad(true); }
+      catch (e) { showToast("できませんでした: " + e.message); }
+      return;
+    }
+    if (ds.plusReopen) {
+      try { const r = await plusApi("update_log", { id: ds.plusReopen, done: false }); plus.log = plus.log.map(x => x.id === r.id ? r : x); plusRerender(); showToast("未対応に戻しました"); }
+      catch (e) { showToast("できませんでした: " + e.message); }
+      return;
+    }
+    if (ds.plusExpireAll !== undefined) {
+      const { overdue } = plusCheckItems();
+      if (!confirm(`過ぎた締切 ${overdue.length}件を「期限切れ」にします。出していないものとして閉じます。よいですか?`)) return;
+      const ids = overdue.filter(x => !x.card).map(x => x.id);
+      try {
+        if (ids.length) await plusApi("close_logs", { ids });
+        plus.log.forEach(l => { if (ids.includes(l.id)) { l.done = true; l.closed_as = "期限切れ"; } });
+        const cards = overdue.filter(x => x.card);
+        if (cards.length) {
+          entries = entries.map(e => { const add = cards.filter(c => c.e.id === e.id).map(c => `${c.k}:${c.d}`); return add.length ? { ...e, doneDue: Array.from(new Set((e.doneDue || []).concat(add))), updatedAt: Date.now() } : e; });
+          saveEntries();
+        }
+        plusRerender(); showToast("閉じました");
+      } catch (e) { showToast("できませんでした: " + e.message); }
+      return;
+    }
     if (ds.cardDone || ds.nextOk) {
       ev.stopPropagation();
       const [id, k, d] = (ds.cardDone || ds.nextOk).split("|");
@@ -805,7 +1093,7 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     if (ds.plusExpand !== undefined) { t.classList.toggle("collapsed"); return; }
     if (ds.plusDellog) {
       if (!confirm("この記録を消しますか?")) return;
-      try { await plusApi("delete_log", { id: ds.plusDellog }); plus.log = plus.log.filter(x => x.id !== ds.plusDellog); plusRerender(); }
+      try { await plusApi("delete_log", { id: ds.plusDellog }); if (plusNoteLogId === ds.plusDellog) plusNoteResetForm(); plus.log = plus.log.filter(x => x.id !== ds.plusDellog); plusRerender(); }
       catch (e) { showToast("消せませんでした: " + e.message); }
       return;
     }
