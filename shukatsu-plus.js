@@ -17,6 +17,8 @@ let plusPwReady = false;
 let plusOpenRow = "";     // 締切の一覧で開いている行
 let plusEditingEs = null;
 
+// 直前に入れた合言葉がちがっていたら true（欄の下に理由を出す）
+let plusKeyWrong = false;
 const plusStore = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
@@ -54,7 +56,7 @@ async function plusLoad(quiet) {
     const d = await plusApi("load");
     plus = { es: d.es || [], log: d.log || [], queue: d.queue || [], episodes: d.episodes || [], notes: d.notes || [],
              profile: d.profile || null, insights: d.insights || [], block: d.block || [] };
-    plusReady = true; plusError = "";
+    plusReady = true; plusError = ""; plusKeyWrong = false;
     try {
       const list = await plusApi("pw_list");
       plusPw = Object.fromEntries((list || []).map(x => [x.entry_id, x.password]));
@@ -65,6 +67,7 @@ async function plusLoad(quiet) {
     if (plus.es.length || plus.log.length) plusStore.set(PLUS_CACHE, JSON.stringify(plus));
   } catch (e) {
     plusError = e.message === "bad key" || e.message === "no key" ? "nokey" : "offline";
+    if (e.message === "bad key") plusKeyWrong = true;
     if (!quiet) console.warn("plus load", e);
   } finally {
     plusLoading = false;
@@ -432,9 +435,10 @@ function plusKeyBannerHtml() {
     <div class="plus-panel-head">ES・記録を見るには合言葉が必要です</div>
     <div class="plus-muted">じぶんノートと同じ合言葉です。</div>
     <div style="display:flex;gap:6px;margin-top:8px;">
-      <input type="password" id="plusKeyInput" placeholder="合言葉" style="flex:1;" autocomplete="off">
+      <input type="password" class="plus-key-input" placeholder="合言葉" style="flex:1;min-width:0;" autocomplete="current-password" autocapitalize="off">
       <button id="plusKeySave">開く</button>
     </div>
+    ${plusKeyWrong ? '<div style="color:#b4402f;font-size:12px;margin-top:6px;">合言葉がちがうようです。もう一度入れてください。</div>' : ""}
   </div>`;
 }
 
@@ -1121,9 +1125,12 @@ function plusOpenBuilder(company, entryId, program, esRows) {
       return;
     }
     if (t.id === "plusKeySave") {
-      const v = document.getElementById("plusKeyInput").value.trim();
-      if (!v) return;
-      plusStore.set(PLUS_KEY_STORE, v); plusError = ""; plusLoad();
+      // 同じ欄が画面のあちこちに出るので、押したボタンの隣の欄を読む
+      const box = t.parentElement.querySelector(".plus-key-input");
+      const v = box ? box.value.trim() : "";
+      if (!v) { showToast("合言葉を入れてください"); return; }
+      t.textContent = "確かめています…"; t.disabled = true;
+      plusStore.set(PLUS_KEY_STORE, v); plusError = ""; plusKeyWrong = false; plusLoad();
       return;
     }
     if (t.id === "plusLogAdd") {
@@ -1149,6 +1156,13 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     catch (e) { t.checked = !t.checked; showToast("できませんでした: " + e.message); }
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) plusLoad(true); });
+  // Enterキー(キーボードの「開く」)でも進む
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" || ev.isComposing || !ev.target.classList || !ev.target.classList.contains("plus-key-input")) return;
+    ev.preventDefault();
+    const btn = ev.target.parentElement.querySelector("#plusKeySave");
+    if (btn) btn.click();
+  });
   window.addEventListener("hashchange", () => { if (/k=/.test(location.hash)) { const m = location.hash.match(/k=([^&]+)/); plusStore.set(PLUS_KEY_STORE, decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname); plusLoad(); } });
   setInterval(() => { if (!document.hidden) plusLoad(true); }, 60000);
   plusRerender();
