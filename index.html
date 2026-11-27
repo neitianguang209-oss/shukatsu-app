@@ -739,7 +739,14 @@
   <div style="width:34px;height:34px;border:4px solid #c7d2fe;border-top-color:#4f46e5;border-radius:50%;animation:jtspin 0.8s linear infinite;"></div>
   <div style="font-size:13px;color:#4f46e5;font-weight:600;">データを同期中...</div>
 </div>
-<style>@keyframes jtspin{to{transform:rotate(360deg)}}</style>
+<style>@keyframes jtspin{to{transform:rotate(360deg)}}
+.top-search { margin-bottom: 10px; }
+.top-search input { width: 100%; box-sizing: border-box; font-size: 16px; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: 12px; background: #fff; }
+.top-search input:focus { outline: none; border-color: var(--primary); }
+.pw-row { display: flex; gap: 6px; }
+.pw-row input { flex: 1; min-width: 0; }
+.pw-note { font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.6; }
+</style>
 <div class="container">
   <header>
     <h1>就活選考管理</h1>
@@ -768,6 +775,9 @@
       <button id="addBtn">＋ 追加</button>
     </div>
   </header>
+  <div class="top-search">
+    <input type="search" id="searchInput" class="search" placeholder="🔍 企業名で検索" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" />
+  </div>
   <div class="tab-bar">
     <button class="tab-btn active" data-tab="main">📋 選考管理</button>
     <button class="tab-btn" data-tab="favored" style="display:none">★ 優遇IS</button>
@@ -776,7 +786,6 @@
   <div id="plusUpcoming"></div>
   <div class="stats" id="stats"></div>
   <div class="filters" id="mainFilters">
-    <input type="text" id="searchInput" class="search" placeholder="企業名で検索" />
     <select id="industryFilter"><option value="">すべての業界</option></select>
     <select id="phaseFilter"><option value="">すべてのフェーズ</option></select>
     <select id="sortBy">
@@ -863,7 +872,7 @@
       <input type="text" id="f_selectionPlan" placeholder="例: ES → WEBテスト(SPI) → GD" />
     </div>
     <details class="form-section">
-      <summary>マイページ情報</summary>
+      <summary>マイページ情報（URL・ID・パスワード）</summary>
       <div class="field">
         <label for="f_mypageUrl">マイページURL</label>
         <input type="url" id="f_mypageUrl" placeholder="https://..." />
@@ -873,11 +882,20 @@
         <input type="text" id="f_mypageId" />
       </div>
       <div class="field">
-        <label for="f_mypagePassword">パスワード（いつもと違う場合のみ）</label>
-        <input type="text" id="f_mypagePassword" placeholder="通常と同じなら空欄でOK" />
+        <label for="f_mypagePassword">パスワード</label>
+        <div class="pw-row">
+          <input type="password" id="f_mypagePassword" autocomplete="new-password" autocapitalize="off" spellcheck="false" placeholder="マイページのパスワード" />
+          <button type="button" class="secondary icon" id="pwShowBtn">表示</button>
+          <button type="button" class="secondary icon" id="pwCopyBtn">コピー</button>
+        </div>
+        <div class="pw-note" id="pwNote"></div>
       </div>
     </details>
     <div class="field" style="margin-top:10px">
+      <label for="f_reading">よみ・別の呼び方（検索用・空欄でOK）</label>
+      <input type="text" id="f_reading" placeholder="検索で出ないときだけ。例: にってつ、NSSOL" />
+    </div>
+    <div class="field">
       <label for="f_memo">メモ</label>
       <textarea id="f_memo" placeholder="準備事項、面接官、ESの内容など（Ctrl+V でクリップボードの画像を貼り付け可）"></textarea>
     </div>
@@ -1770,6 +1788,7 @@
       mypageUrl: String(e.mypageUrl || ""),
       mypageId: String(e.mypageId || ""),
       mypagePassword: String(e.mypagePassword || ""),
+      reading: String(e.reading || ""),
       selectionPlan: String(e.selectionPlan || ""),
       memo: String(e.memo || ""),
       // 済みにした締切("es:2026-11-20" / "web:…" / "other:…")、次の予定なしでOKにしたフェーズ、どこから入ったか
@@ -1846,27 +1865,6 @@
       .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
       .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
   }
-  // ひらがな→カタカナ統一 + 小文字化（おりっくす でも オリックス がヒット）
-  function kanaFold(s) {
-    return String(s || "")
-      .toLowerCase()
-      .replace(/[ぁ-ゖ]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60));
-  }
-  // 検索用の正規化: かな統一 + 記号/スペース除去
-  function searchNorm(s) {
-    return kanaFold(s).replace(/[・･\s　.\-'’&()（）]/g, "");
-  }
-  // INDUSTRY_DICT の別名グループ（NTTデータ⇔NTT DATA、オムロン⇔OMRON などを同一視）
-  const COMPANY_ALIAS_GROUPS = INDUSTRY_DICT.map(([keys]) => keys.map(k => searchNorm(k)).filter(Boolean));
-  function aliasGroupsFor(text) {
-    const t = searchNorm(text);
-    if (!t) return [];
-    const gi = [];
-    for (let i = 0; i < COMPANY_ALIAS_GROUPS.length; i++) {
-      if (COMPANY_ALIAS_GROUPS[i].some(k => k.length >= 2 && t.includes(k))) gi.push(i);
-    }
-    return gi;
-  }
   // 時刻セレクト（時のみ、00分固定）
   function buildHourOptions() {
     let opts = '<option value="">--時--</option>';
@@ -1894,16 +1892,9 @@
     }
     el.value = val;
   }
-  // 企業名の柔軟マッチ（部分一致 + 表記ゆれ/英カナ別名）
-  function companyMatches(company, query) {
-    const q = searchNorm(query);
-    if (!q) return true;
-    const c = searchNorm(company);
-    if (c.includes(q) || q.includes(c)) return true;
-    const cg = aliasGroupsFor(company);
-    if (!cg.length) return false;
-    const qg = aliasGroupsFor(query);
-    return qg.some(g => cg.includes(g));
+  // 企業名の柔軟マッチ(中身は company-search.js)
+  function companyMatches(company, query, extra) {
+    return companySearch.match(company, query, extra);
   }
   function dueDone(e, k, d) { return !!d && Array.isArray(e.doneDue) && e.doneDue.includes(`${k}:${d}`); }
   function effectiveDeadline(e) {
@@ -1997,12 +1988,12 @@
     const list = document.getElementById("list");
     let items = entries.slice();
     const q = filters.search.trim();
-    if (q) items = items.filter(e => companyMatches(e.company, q));
+    if (q) items = companySearch.filter(items, q, e => e.company, e => e.reading);
     if (filters.industry) items = items.filter(e => e.industry === filters.industry);
     if (filters.phase) items = items.filter(e => e.phase === filters.phase);
-    // 完了フェーズ（内定/不合格/辞退）は通常非表示。ただしそのフェーズで絞り込み中、
+    // 検索中は終わった会社も出す。完了フェーズ（内定/不合格/辞退）は通常非表示。ただしそのフェーズで絞り込み中、
     // または「締切過ぎ・完了を表示」ONのときは表示する。IS落ちは本選考につながるのでいつも出す。
-    if (!showArchive && !filters.phase) {
+    if (!showArchive && !filters.phase && !q) {
       items = items.filter(e => !phaseByKey[e.phase]?.done || e.phase === "IS落ち");
     }
     if (quickSoon) {
@@ -2094,7 +2085,7 @@
     list.querySelectorAll('img[data-img-card]').forEach(img => {
       img.addEventListener("click", () => openCardImages(img));
     });
-    list.querySelectorAll('button.copy-id').forEach(btn => {
+    list.querySelectorAll('button.copy-id[data-value]').forEach(btn => {
       btn.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         const id = btn.dataset.value;
@@ -2211,11 +2202,12 @@
       }
     }
     let linksHtml = "";
-    if (e.mypageUrl || e.mypageId || e.mypagePassword) {
+    const hasPw = typeof plusPwOf === "function" ? !!plusPwOf(e) : !!e.mypagePassword;
+    if (e.mypageUrl || e.mypageId || hasPw) {
       const parts = [];
       if (e.mypageUrl) parts.push(`<a class="card-link" href="${escapeHtml(e.mypageUrl)}" target="_blank" rel="noopener noreferrer">🔗 マイページ</a>`);
       if (e.mypageId) parts.push(`<button class="copy-id" data-value="${escapeHtml(e.mypageId)}" title="クリックでコピー">ID: ${escapeHtml(e.mypageId)}</button>`);
-      if (e.mypagePassword) parts.push(`<button class="copy-id" data-value="${escapeHtml(e.mypagePassword)}" title="クリックでパスワードをコピー">🔑 PWをコピー</button>`);
+      if (hasPw) parts.push(`<button class="copy-id" data-pwcopy="${escapeHtml(e.id)}" title="クリックでパスワードをコピー">🔑 PWをコピー</button>`);
       linksHtml = `<div class="card-links">${parts.join("")}</div>`;
     }
     let imagesHtml = "";
@@ -2292,6 +2284,9 @@
     document.getElementById("scrshotBtn").style.display = currentTab === "favored" ? "" : "none";
     const isEs = currentTab === "es";
     ["stats", "mainFilters", "list"].forEach(id => { document.getElementById(id).style.display = isEs ? "none" : ""; });
+    // 検索中は結果が検索欄のすぐ下に出るように、集計は隠す
+    if (currentTab === "main" && filters.search.trim()) document.getElementById("stats").style.display = "none";
+    document.getElementById("searchInput").placeholder = isEs ? "🔍 企業名・設問・本文で検索" : "🔍 企業名で検索";
     document.getElementById("esView").style.display = isEs ? "" : "none";
     if (typeof plusRenderUpcoming === "function") plusRenderUpcoming();
     if (isEs) {
@@ -2532,7 +2527,8 @@
     setTimeSelect("f_otherDeadlineTime", data.otherDeadlineTime);
     document.getElementById("f_mypageUrl").value      = data.mypageUrl || "";
     document.getElementById("f_mypageId").value       = data.mypageId  || "";
-    document.getElementById("f_mypagePassword").value = data.mypagePassword || "";
+    plusPwFill(e, data);
+    document.getElementById("f_reading").value        = data.reading || "";
     document.getElementById("f_selectionPlan").value  = data.selectionPlan || "";
     document.getElementById("f_memo").value           = data.memo     || "";
     currentImages = Array.isArray(data.images) ? data.images.slice() : [];
@@ -2543,7 +2539,7 @@
     document.getElementById("siblingAddBtn").style.display = e ? "" : "none";
     if (typeof plusRenderModalSection === "function") plusRenderModalSection(e ? e.id : null);
     const det = document.querySelector(".form-section");
-    det.open = !!(data.mypageUrl || data.mypageId || data.mypagePassword);
+    det.open = true;
     document.getElementById("modal").classList.add("open");
     setTimeout(() => document.getElementById("f_company").focus(), 50);
   }
@@ -2596,7 +2592,7 @@
       otherDeadlineTime: document.getElementById("f_otherDeadlineTime").value,
       mypageUrl:       document.getElementById("f_mypageUrl").value.trim(),
       mypageId:        document.getElementById("f_mypageId").value.trim(),
-      mypagePassword:  document.getElementById("f_mypagePassword").value.trim(),
+      reading:         document.getElementById("f_reading").value.trim(),
       selectionPlan:   document.getElementById("f_selectionPlan").value.trim(),
       memo:            document.getElementById("f_memo").value.trim(),
       images:          currentImages.slice(),
@@ -2613,6 +2609,9 @@
     commitSave(data, editingId, null);
   }
   function commitSave(data, editingIdLocal, overwriteId) {
+    // パスワードはカード(だれでも読める表)に入れず、合言葉つきの保管場所へ送る
+    const pwInput = plusPwRead();
+    let savedId = overwriteId || editingIdLocal;
     if (overwriteId) {
       const idx = entries.findIndex(x => x.id === overwriteId);
       if (idx >= 0) {
@@ -2631,9 +2630,11 @@
       const idx = entries.findIndex(x => x.id === editingIdLocal);
       if (idx >= 0) entries[idx] = normalizeEntry({ ...entries[idx], ...data, updatedAt: Date.now() });
     } else {
-      entries.push(normalizeEntry({ id: uid(), ...data, createdAt: Date.now(), updatedAt: Date.now() }));
+      savedId = uid();
+      entries.push(normalizeEntry({ id: savedId, ...data, createdAt: Date.now(), updatedAt: Date.now() }));
     }
     saveEntries();
+    if (pwInput.changed && !(overwriteId && !pwInput.value)) plusPwSave(savedId, data.company, pwInput.value);
     closeModal();
     renderAll();
     showToast(overwriteId ? "上書きしました" : editingIdLocal ? "更新しました" : "追加しました");
@@ -3562,12 +3563,11 @@
       const tab = btn.dataset.tab;
       if (currentTab === tab) return;
       currentTab = tab;
-      filters.search = "";
+      if (tab === "favored") { filters.search = ""; document.getElementById("searchInput").value = ""; }
       filters.industry = "";
       filters.phase = "";
       filters.perkType = "";
       filters.source = "";
-      document.getElementById("searchInput").value = "";
       renderAll();
     });
   });
@@ -3786,7 +3786,9 @@
   });
   document.getElementById("searchInput").addEventListener("input", (e) => {
     filters.search = e.target.value;
-    if (currentTab === "main") renderList(); else renderFavoredList();
+    if (currentTab === "es") { if (plusEsView !== "es") plusEsView = "es"; renderAll(); }
+    else if (currentTab === "main") renderAll();
+    else renderFavoredList();
   });
   document.getElementById("industryFilter").addEventListener("change", (e) => {
     if (currentTab === "main") { filters.industry = e.target.value; renderList(); }
@@ -3960,7 +3962,8 @@
     }
   })();
 </script>
-<script src="shukatsu-plus.js?v=4"></script>
+<script src="company-search.js?v=1"></script>
+<script src="shukatsu-plus.js?v=5"></script>
 <script src="es-builder.js?v=3"></script>
 </body>
 </html>

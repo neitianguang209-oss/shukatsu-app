@@ -11,7 +11,10 @@ const PLUS_LOG_ICON = { "締切": "⏰", "予定": "📅", "連絡": "✉️", "
 
 let plus = { es: [], log: [], queue: [], episodes: [], notes: [], block: [] };
 let plusReady = false, plusLoading = false, plusError = "";
-let plusEsFilter = "", plusEsSearch = "", plusEsView = "es";   // builder | es | material
+let plusEsFilter = "", plusEsView = "es";   // builder | es | material
+let plusPw = {};          // カードID → パスワード。画面の中だけに持ち、端末には保存しない
+let plusPwReady = false;
+let plusOpenRow = "";     // 締切の一覧で開いている行
 let plusEditingEs = null;
 
 const plusStore = {
@@ -52,6 +55,12 @@ async function plusLoad(quiet) {
     plus = { es: d.es || [], log: d.log || [], queue: d.queue || [], episodes: d.episodes || [], notes: d.notes || [],
              profile: d.profile || null, insights: d.insights || [], block: d.block || [] };
     plusReady = true; plusError = "";
+    try {
+      const list = await plusApi("pw_list");
+      plusPw = Object.fromEntries((list || []).map(x => [x.entry_id, x.password]));
+      plusPwReady = true;
+      plusPwMigrate();
+    } catch (e) { console.warn("pw load", e); }
     // 0件のときは控えを上書きしない
     if (plus.es.length || plus.log.length) plusStore.set(PLUS_CACHE, JSON.stringify(plus));
   } catch (e) {
@@ -195,15 +204,90 @@ function plusCheckItems() {
 function plusDueRowHtml(x, extra) {
   const chip = plusChip(x.due_at);
   const e = x.card ? x.e : entries.find(y => plusMatch(x, y));
+  const rowKey = x.card ? x.key : String(x.id);
   const btn = x.card ? `<button class="plus-check" data-card-done="${escapeHtml(x.key)}" title="済みにする">✓</button>`
                      : `<button class="plus-check" data-plus-done="${x.id}" title="済みにする">✓</button>`;
   return `<div class="plus-up-row">
     ${btn}
-    <div class="plus-up-main" ${e ? `data-plus-open="${e.id}"` : ""}>
+    <div class="plus-up-main" data-plus-peek="${escapeHtml(rowKey)}">
       <div><b>${escapeHtml(plusDueText(x.due_at))}</b> ${chip ? `<span class="days-left ${chip.cls}">${escapeHtml(chip.text)}</span>` : ""}${extra || ""}</div>
       <div class="plus-up-title">${PLUS_LOG_ICON[x.kind] || "⏰"} ${escapeHtml(x.company)}　${escapeHtml(x.title)}</div>
     </div>
+    <span class="plus-caret" data-plus-peek="${escapeHtml(rowKey)}">${plusOpenRow === rowKey ? "▲" : "▼"}</span>
+  </div>${plusOpenRow === rowKey ? plusPeekHtml(e, x.company, x.body) : ""}`;
+}
+// 同じ会社のカードやメモから、マイページのURL・ID・パスワードを集める
+function plusMypage(e, company, body) {
+  const name = plusNorm(e ? e.company : company);
+  const same = entries.filter(y => (!e || y.id !== e.id) && plusNorm(y.company) === name);
+  const cards = (e ? [e] : []).concat(same);
+  const pick = f => { for (const c of cards) { const v = f(c); if (v) return v; } return ""; };
+  const note = (plus.notes || []).find(n => plusNorm(n.company) === name);
+  const inBody = String(body || "").match(/https?:\/\/[^\s　）)」]+/);
+  const url = pick(c => c.mypageUrl) || (note && note.mypage_url) || (inBody ? inBody[0] : "");
+  const idCard = cards.find(c => c.mypageId);
+  const id = idCard ? idCard.mypageId : "";
+  // パスワードは、このカードか、同じID(なければ同じ会社)のカードのもの
+  const pwCard = (e && plusPwOf(e) ? e : null) || same.find(c => plusPwOf(c) && (!id || !c.mypageId || c.mypageId === id));
+  return { url: /^https?:\/\//i.test(url) ? url : "", id, pwId: pwCard ? pwCard.id : "" };
+}
+function plusPeekHtml(e, company, body) {
+  const m = plusMypage(e, company, body);
+  return `<div class="plus-peek">
+    ${m.url ? `<div class="plus-peek-row"><a class="plus-peek-main" href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">🔗 マイページを開く<small>${escapeHtml(m.url)}</small></a><button class="secondary" data-copy="${escapeHtml(m.url)}">URLをコピー</button></div>`
+            : `<div class="plus-muted">マイページのリンクは未登録です</div>`}
+    ${m.id ? `<div class="plus-peek-row"><span class="plus-peek-main">ID<small>${escapeHtml(m.id)}</small></span><button data-copy="${escapeHtml(m.id)}">IDをコピー</button></div>`
+           : `<div class="plus-muted">IDは未登録です</div>`}
+    ${m.pwId ? `<div class="plus-peek-row"><span class="plus-peek-main">パスワード<small>••••••••</small></span><button data-pwcopy="${escapeHtml(m.pwId)}">PWをコピー</button></div>` : ""}
+    ${e ? `<button class="plus-more" data-plus-open="${e.id}">${m.url && m.id && m.pwId ? "くわしく見る・直す" : "登録する・くわしく見る"} ›</button>` : ""}
   </div>`;
+}
+
+// ---------- パスワード(合言葉つきの保管場所 shukatsu_secrets) ----------
+function plusPwOf(e) { return e ? (plusPw[e.id] || e.mypagePassword || "") : ""; }
+let plusPwStart = "";
+function plusPwFill(e, data) {
+  const input = document.getElementById("f_mypagePassword");
+  plusPwStart = e ? plusPwOf(e) : "";
+  input.value = plusPwStart || (!e && data.mypagePassword) || "";
+  input.type = "password";
+  document.getElementById("pwShowBtn").textContent = "表示";
+  document.getElementById("pwNote").textContent = !plusKey()
+    ? "合言葉を登録すると保存できます(画面上の合言葉の欄から)。"
+    : !plusPwReady ? "保存済みのパスワードをまだ読み込めていません。空欄のままなら変わりません。"
+    : "合言葉を入れた端末だけで見られる場所に保存します。";
+}
+function plusPwRead() {
+  const v = document.getElementById("f_mypagePassword").value.trim();
+  return { value: v, changed: v !== plusPwStart };
+}
+async function plusPwSave(entryId, company, value) {
+  const before = plusPw[entryId];
+  if (value) plusPw[entryId] = value; else delete plusPw[entryId];
+  try {
+    await plusApi("pw_set", { entry_id: entryId, company, password: value });
+    plusRerender();
+  } catch (e) {
+    if (before) plusPw[entryId] = before; else delete plusPw[entryId];
+    plusRerender();
+    alert("パスワードだけ保存できませんでした。通信と合言葉を確かめて、もう一度保存してください。\n(" + e.message + ")");
+  }
+}
+// 以前カードに直接入れていたパスワードは、保管場所へ移してカードから消す
+let plusPwMoving = false;
+async function plusPwMigrate() {
+  if (plusPwMoving) return;
+  const old = entries.filter(e => e.mypagePassword);
+  if (!old.length) return;
+  plusPwMoving = true;
+  try {
+    for (const e of old) {
+      if (!plusPw[e.id]) { await plusApi("pw_set", { entry_id: e.id, company: e.company, password: e.mypagePassword }); plusPw[e.id] = e.mypagePassword; }
+      entries = entries.map(x => x.id === e.id ? { ...x, mypagePassword: "", updatedAt: Date.now() } : x);
+    }
+    saveEntries();
+  } catch (err) { console.warn("pw migrate", err); }
+  finally { plusPwMoving = false; }
 }
 function plusCheckPanelHtml() {
   const { overdue, noNext } = plusCheckItems();
@@ -214,10 +298,10 @@ function plusCheckPanelHtml() {
       ${overdue.map(x => plusDueRowHtml(x)).join("")}` : ""}
     ${noNext.length ? `<div class="plus-muted" style="margin-top:6px;">選考中なのに、次の締切・予定が入っていません。メールやマイページを確かめてください。</div>
       ${noNext.map(e => `<div class="plus-up-row">
-        <div class="plus-up-main" data-plus-open="${e.id}"><div class="plus-up-title"><b>${escapeHtml(e.company)}</b>${e.program ? ` <span class="plus-muted">${escapeHtml(e.program)}</span>` : ""}</div>
+        <div class="plus-up-main" data-plus-peek="next:${e.id}"><div class="plus-up-title"><b>${escapeHtml(e.company)}</b>${e.program ? ` <span class="plus-muted">${escapeHtml(e.program)}</span>` : ""}</div>
           <div class="plus-muted">フェーズ: ${escapeHtml(e.phase)}</div></div>
         <button class="secondary icon" data-next-ok="${e.id}">今は予定なし</button>
-      </div>`).join("")}` : ""}
+      </div>${plusOpenRow === `next:${e.id}` ? plusPeekHtml(e, e.company) : ""}`).join("")}` : ""}
   </div>`;
 }
 
@@ -225,7 +309,7 @@ function plusRenderUpcoming() {
   plusShowBuilderView();
   const el = document.getElementById("plusUpcoming");
   if (!el) return;
-  if (currentTab !== "main") { el.innerHTML = ""; return; }
+  if (currentTab !== "main" || filters.search.trim()) { el.innerHTML = ""; return; }
   if (!plusReady) { el.innerHTML = plusError === "nokey" ? plusKeyBannerHtml() : ""; return; }
   const limit = Date.now() + 14 * 86400000;
   const today0 = new Date(); today0.setHours(0, 0, 0, 0);
@@ -397,16 +481,20 @@ function plusRenderEsTab() {
   plusShowBuilderView();
   if (plusEsView === "builder") { v.innerHTML = head; if (typeof esBuilder !== "undefined") esBuilder.sync(); return; }
   if (plusEsView === "material") { v.innerHTML = head + plusMaterialHtml(); return; }
-  const q = plusEsSearch.trim();
+  const q = filters.search.trim();
   let items = plus.es.slice();
   if (plusEsFilter) items = items.filter(a => a.status === plusEsFilter);
-  if (q) items = items.filter(a => companyMatches(a.company, q) || (a.question || "").includes(q) || (a.answer || "").includes(q));
+  if (q) {
+    const readingOf = a => entries.filter(e => plusMatch(a, e)).map(e => e.reading || "").join(" ");
+    const n = companySearch.norm(q);
+    const text = a => !!n && companySearch.norm(`${a.question || ""} ${a.answer || ""}`).includes(n);
+    let hit = items.filter(a => companySearch.match(a.company, q, readingOf(a)) || text(a));
+    if (!hit.length) hit = items.filter(a => companySearch.loose(a.company, q, readingOf(a)));
+    items = hit;
+  }
   const counts = Object.fromEntries(PLUS_ES_STATUSES.map(s => [s, plus.es.filter(a => a.status === s).length]));
   const waiting = plus.queue.filter(x => x.kind === "ES" && x.status === "待ち");
   v.innerHTML = head + `
-    <div class="filters" style="margin-top:8px;">
-      <input type="text" id="plusEsSearch" class="search" placeholder="会社名・設問・本文で探す" value="${escapeHtml(plusEsSearch)}">
-    </div>
     <div class="plus-chips">
       <button class="${plusEsFilter ? "" : "on"}" data-plus-filter="">すべて</button>
       ${PLUS_ES_STATUSES.filter(s => counts[s]).map(s => `<button class="${plusEsFilter === s ? "on" : ""}" data-plus-filter="${s}">${s.replace("(設問ごと未分割)", "")} ${counts[s]}</button>`).join("")}
@@ -431,6 +519,7 @@ function plusEsCardHtml(a) {
         <span class="plus-st st-${escapeHtml(a.status || "")}">${escapeHtml(a.status || "")}</span>
         ${a.result && a.result !== "不明" ? `<span class="plus-st">${escapeHtml(a.result)}</span>` : ""}
         ${a.answer ? plusCountHtml(a.answer, a.char_limit) : ""}
+        ${a.source === "Muse" ? `<span class="plus-st">Muse</span>` : ""}
         ${a.deadline ? `<span>締切 ${escapeHtml(plusDueText(a.deadline))}</span>` : ""}
         ${chip ? `<span class="days-left ${chip.cls}">${escapeHtml(chip.text)}</span>` : ""}
       </div>
@@ -586,6 +675,14 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     .plus-up-title { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .plus-check { width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid var(--border); background: #fff; color: var(--muted); padding: 0; flex: none; font-size: 14px; }
     .plus-check:hover { border-color: var(--success); color: var(--success); background: #ecfdf5; }
+    .plus-caret { color: var(--muted); font-size: 11px; cursor: pointer; padding: 8px 2px; }
+    .plus-peek { background: #f5f6ff; border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .plus-peek-row { display: flex; gap: 8px; align-items: center; }
+    .plus-peek-row button { flex: none; font-size: 13px; padding: 9px 12px; min-width: 104px; }
+    .plus-peek-row button.copied { background: var(--success); color: #fff; }
+    .plus-peek-main { flex: 1; min-width: 0; font-size: 13px; font-weight: 700; color: var(--text); text-decoration: none; }
+    a.plus-peek-main { color: var(--primary); }
+    .plus-peek-main small { display: block; font-weight: 500; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
     .plus-more { background: none; color: var(--primary); padding: 4px 0; font-size: 12px; }
     .plus-wait-line { margin-top: 6px; font-size: 12px; color: #92400e; background: #fffbeb; border-radius: 8px; padding: 6px 8px; line-height: 1.6; }
     .plus-muted { color: var(--muted); font-size: 12px; font-weight: 400; }
@@ -647,7 +744,7 @@ function plusOpenBuilder(company, entryId, program, esRows) {
   document.head.appendChild(style);
 
   document.addEventListener("click", async ev => {
-    const t = ev.target.closest("[data-card-done],[data-next-ok],[data-plus-open],[data-plus-done],[data-plus-more],[data-plus-es],[data-plus-es-new],[data-plus-ask],[data-plus-copy],[data-plus-filter],[data-plus-view],[data-plus-dellog],[data-plus-expand],[data-plus-keep],[data-plus-block-cand],[data-plus-unblock],[data-plus-block-entry],#plusKeySave,#plusLogAdd");
+    const t = ev.target.closest("[data-card-done],[data-next-ok],[data-plus-open],[data-plus-done],[data-plus-more],[data-plus-es],[data-plus-es-new],[data-plus-ask],[data-plus-copy],[data-plus-filter],[data-plus-view],[data-plus-dellog],[data-plus-expand],[data-plus-keep],[data-plus-block-cand],[data-plus-unblock],[data-plus-block-entry],[data-plus-peek],[data-copy],[data-pwcopy],#plusKeySave,#plusLogAdd,#pwShowBtn,#pwCopyBtn");
     if (!t) return;
     const ds = t.dataset;
     if (ds.cardDone || ds.nextOk) {
@@ -664,6 +761,22 @@ function plusOpenBuilder(company, entryId, program, esRows) {
       return;
     }
     if (ds.plusOpen) { ev.stopPropagation(); openModal(ds.plusOpen); return; }
+    if (ds.plusPeek) { ev.stopPropagation(); plusOpenRow = plusOpenRow === ds.plusPeek ? "" : ds.plusPeek; plusRenderUpcoming(); return; }
+    if (ds.copy !== undefined || ds.pwcopy !== undefined || t.id === "pwCopyBtn") {
+      ev.stopPropagation();
+      const value = t.id === "pwCopyBtn" ? document.getElementById("f_mypagePassword").value
+        : ds.pwcopy !== undefined ? plusPwOf(entries.find(x => x.id === ds.pwcopy)) : ds.copy;
+      if (!value) { showToast("コピーするものがありません"); return; }
+      if (await copyToClipboard(value)) { t.classList.add("copied"); showToast("コピーしました"); setTimeout(() => t.classList.remove("copied"), 1200); }
+      else showCopyFallback(value);
+      return;
+    }
+    if (t.id === "pwShowBtn") {
+      const i = document.getElementById("f_mypagePassword");
+      i.type = i.type === "password" ? "text" : "password";
+      t.textContent = i.type === "password" ? "表示" : "隠す";
+      return;
+    }
     if (ds.plusDone) {
       t.disabled = true;
       try { await plusApi("update_log", { id: ds.plusDone, done: true }); const l = plus.log.find(x => x.id === ds.plusDone); if (l) l.done = true; plusRerender(); showToast("済みにしました"); }
@@ -747,14 +860,6 @@ function plusOpenBuilder(company, entryId, program, esRows) {
     try { await plusApi("update_log", { id: t.dataset.plusToggle, done: t.checked }); const l = plus.log.find(x => x.id === t.dataset.plusToggle); if (l) l.done = t.checked; plusRerender(); }
     catch (e) { t.checked = !t.checked; showToast("できませんでした: " + e.message); }
   });
-  document.addEventListener("input", ev => {
-    if (ev.target.id === "plusEsSearch") {
-      plusEsSearch = ev.target.value;
-      clearTimeout(plusInstall.t);
-      plusInstall.t = setTimeout(() => { plusRenderEsTab(); const s = document.getElementById("plusEsSearch"); if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); } }, 250);
-    }
-  });
-
   document.addEventListener("visibilitychange", () => { if (!document.hidden) plusLoad(true); });
   window.addEventListener("hashchange", () => { if (/k=/.test(location.hash)) { const m = location.hash.match(/k=([^&]+)/); plusStore.set(PLUS_KEY_STORE, decodeURIComponent(m[1])); history.replaceState(null, "", location.pathname); plusLoad(); } });
   setInterval(() => { if (!document.hidden) plusLoad(true); }, 60000);
